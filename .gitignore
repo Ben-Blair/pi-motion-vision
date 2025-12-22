@@ -1,0 +1,4 @@
+*.log
+*.tmp
+*.swp
+.motion_email_last_sent
