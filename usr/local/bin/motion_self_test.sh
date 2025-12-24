@@ -35,11 +35,11 @@ if ! systemctl is-active --quiet motion; then
 fi
 echo "OK: Motion service running"
 
-# 2. Snapshot directory writable
-if ! sudo -u motion test -w /dev/shm/motion; then
-  fail "Motion cannot write to /dev/shm/motion (snapshots)"
+# 2. Snapshot directory writable (RAM tmpfs)
+if ! sudo -u motion test -w /var/lib/motion/snapshots; then
+  fail "Motion cannot write to /var/lib/motion/snapshots (RAM snapshots)"
 fi
-echo "OK: Snapshot directory writable"
+echo "OK: Snapshot directory writable (RAM)"
 
 # 3. Video directory writable
 if ! sudo -u motion test -w /var/lib/motion; then

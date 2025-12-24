@@ -7,11 +7,15 @@ BODY="Motion was detected. See attached snapshot."
 COOLDOWN_SECONDS=10
 
 STAMP_FILE="/var/lib/motion/.motion_email_last_sent"
-SNAPSHOT_DIR="/dev/shm/motion"
+BEST_SNAPSHOT="/var/lib/motion/best_snapshot.jpg"
+
+# RAM snapshots (tmpfs – single source of truth)
+RAM_SNAPSHOT_DIR="/var/lib/motion/snapshots"
+
 LOG_TAG="motion_email"
 
 # =========================
-# Test mode (used by self-test)
+# Test mode
 # =========================
 TEST_MODE="${TEST_MODE:-0}"
 
@@ -26,7 +30,7 @@ NOW=$(date +%s)
 logger -t "$LOG_TAG" "Hook started (TEST_MODE=$TEST_MODE)"
 
 # =========================
-# Cooldown check (skip in test mode)
+# Cooldown check
 # =========================
 if [ "$TEST_MODE" = "0" ] && [ -f "$STAMP_FILE" ]; then
     LAST_SENT=$(cat "$STAMP_FILE" 2>/dev/null || echo 0)
@@ -37,22 +41,18 @@ if [ "$TEST_MODE" = "0" ] && [ -f "$STAMP_FILE" ]; then
 fi
 
 # =========================
-# Find newest snapshot
+# Verify best snapshot exists
 # =========================
-SNAPSHOT=""
-if [ "$TEST_MODE" = "0" ]; then
-    for i in {1..10}; do
-        SNAPSHOT=$(ls -t "$SNAPSHOT_DIR"/*.jpg 2>/dev/null | head -n 1)
-        [ -n "$SNAPSHOT" ] && break
-        sleep 0.1
-    done
+if [ "$TEST_MODE" = "0" ] && [ ! -f "$BEST_SNAPSHOT" ]; then
+    logger -t "$LOG_TAG" "Best snapshot not found, skipping email"
+    exit 0
 fi
 
 # =========================
 # Send email
 # =========================
-if [ -n "$SNAPSHOT" ] && [ "$TEST_MODE" = "0" ]; then
-    logger -t "$LOG_TAG" "Sending email with attachment $SNAPSHOT"
+if [ "$TEST_MODE" = "0" ]; then
+    logger -t "$LOG_TAG" "Sending email with attachment $BEST_SNAPSHOT"
     {
         echo "Subject: $SUBJECT"
         echo "To: $TO_EMAIL"
@@ -66,38 +66,33 @@ if [ -n "$SNAPSHOT" ] && [ "$TEST_MODE" = "0" ]; then
         echo
         echo "--BOUNDARY"
         echo "Content-Type: image/jpeg"
-        echo "Content-Disposition: attachment; filename=\"$(basename "$SNAPSHOT")\""
+        echo "Content-Disposition: attachment; filename=\"best_snapshot.jpg\""
         echo "Content-Transfer-Encoding: base64"
         echo
-        base64 "$SNAPSHOT"
+        base64 "$BEST_SNAPSHOT"
         echo
         echo "--BOUNDARY--"
     } | msmtp "$TO_EMAIL"
-
 else
-    logger -t "$LOG_TAG" "Sending text-only email"
+    logger -t "$LOG_TAG" "Sending self-test email (no attachment)"
     {
         echo "Subject: $SUBJECT"
         echo "To: $TO_EMAIL"
         echo
-        if [ "$TEST_MODE" = "1" ]; then
-            echo "Self-test email: snapshot intentionally skipped."
-        else
-            echo "Motion detected, but no snapshot found."
-        fi
+        echo "Self-test email: snapshot intentionally skipped."
     } | msmtp "$TO_EMAIL"
 fi
 
 # =========================
-# Cleanup RAM snapshots (real mode only)
+# Cleanup RAM snapshots
 # =========================
 if [ "$TEST_MODE" = "0" ]; then
     logger -t "$LOG_TAG" "Cleaning old RAM snapshots"
-    find "$SNAPSHOT_DIR" -type f -name "*.jpg" -mmin +1 -delete
+    find "$RAM_SNAPSHOT_DIR" -type f -name "*.jpg" -mmin +1 -delete
 fi
 
 # =========================
-# Update cooldown timestamp (real mode only)
+# Update cooldown timestamp
 # =========================
 if [ "$TEST_MODE" = "0" ]; then
     echo "$NOW" > "$STAMP_FILE"
