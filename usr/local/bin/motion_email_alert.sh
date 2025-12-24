@@ -83,13 +83,6 @@ else
     } | msmtp "$TO_EMAIL"
 fi
 
-# =========================
-# Cleanup RAM snapshots
-# =========================
-if [ "$TEST_MODE" = "0" ]; then
-    logger -t "$LOG_TAG" "Cleaning old RAM snapshots"
-    find "$RAM_SNAPSHOT_DIR" -type f -name "*.jpg" -mmin +1 -delete
-fi
 
 # =========================
 # Update cooldown timestamp
