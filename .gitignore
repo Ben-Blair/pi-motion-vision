@@ -4,3 +4,5 @@
 .motion_email_last_sent
 backup/
 backup/
+motion.conf
+camera0.conf
