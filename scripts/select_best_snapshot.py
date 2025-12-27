@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-#Test123
 
 import argparse
 import cv2
