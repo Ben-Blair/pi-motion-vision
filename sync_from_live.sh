@@ -7,6 +7,7 @@ echo "Syncing Motion config from live system..."
 
 cp /etc/motion/*.conf "$REPO/etc/motion/"
 cp /usr/local/bin/motion_*.sh "$REPO/usr/local/bin/"
+cp -r /etc/motion/scripts "$REPO/scripts/"
 
 cd "$REPO"
 
