@@ -7,7 +7,7 @@ BODY="Motion was detected. See attached snapshot."
 COOLDOWN_SECONDS=10
 
 STAMP_FILE="/var/lib/motion/.motion_email_last_sent"
-BEST_SNAPSHOT="/var/lib/motion/best_snapshot.jpg"
+BEST_SNAPSHOT="${1:-/var/lib/motion/best_snapshot.jpg}"
 
 # RAM snapshots (tmpfs – single source of truth)
 RAM_SNAPSHOT_DIR="/var/lib/motion/snapshots"
