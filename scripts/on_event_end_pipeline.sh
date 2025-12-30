@@ -27,10 +27,21 @@ find "$SNAPDIR" -maxdepth 1 -type f -name "*.jpg" ! -newer "$CUTOFF_FILE" -exec 
 
 OUT="$WORKDIR/best_snapshot.jpg"
 
+# Optional debug: write annotated scored frames to a persistent directory so you can
+# watch the scoring live even though snapshots are stored in tmpfs and get cleared.
+# Enable by exporting MOTION_DEBUG_SCORING=1 in the motion service environment.
+DEBUG_ARGS=()
+if [ "${MOTION_DEBUG_SCORING:-0}" = "1" ]; then
+  DEBUG_DIR="/var/lib/motion/debug_scoring/$(basename "$WORKDIR")"
+  mkdir -p "$DEBUG_DIR" || true
+  DEBUG_ARGS+=( --debug-write-frames --debug-out-dir "$DEBUG_DIR" --debug-max-frames 600 )
+fi
+
 # Analyze only the frozen copies
 /usr/local/bin/select_best_snapshot.py \
   --snapshot-dir "$WORKDIR/snapshots" \
-  --output-file "$OUT"
+  --output-file "$OUT" \
+  "${DEBUG_ARGS[@]}"
 
 # Email THIS event's best snapshot (path passed in)
 /usr/local/bin/motion_email_alert.sh "$OUT"
