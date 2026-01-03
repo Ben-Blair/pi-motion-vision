@@ -5,7 +5,16 @@ set -euo pipefail
 
 SNAPDIR="/var/lib/motion/snapshots"
 EVENT_DIR="/var/lib/motion"
+
+# Best-effort: use current_event_id to select the live-score cache DB.
+# If events overlap, this may point to the newer event; in that case we simply
+# lose some cache benefit, but correctness remains (we can always rescore).
 EVENT_ID_FILE="$EVENT_DIR/current_event_id"
+EVENT_ID="unknown"
+if [ -r "$EVENT_ID_FILE" ]; then
+  EVENT_ID="$(tr -d '\r\n' < "$EVENT_ID_FILE")"
+fi
+CACHE_DB="$EVENT_DIR/score_cache_${EVENT_ID}.sqlite3"
 
 # Serialize event-end processing so we never mix two events' snapshots.
 LOCKFILE="/var/lib/motion/.on_event_end_pipeline.lock"
@@ -20,59 +29,31 @@ trap cleanup EXIT
 
 mkdir -p "$WORKDIR/snapshots"
 
-# Identify event id (used for per-event best artifacts)
-EVENT_ID="unknown"
-if [ -r "$EVENT_ID_FILE" ]; then
-  EVENT_ID="$(tr -d '\r\n' < "$EVENT_ID_FILE")"
-fi
-
 # Cutoff marker: anything newer than this belongs to a newer event and must not be deleted.
 CUTOFF_FILE="$WORKDIR/cutoff"
 touch "$CUTOFF_FILE"
 
-# Ask the live scoring worker to flush the final best (low SD writes during event, final commit now).
-QUEUE_DIR="$EVENT_DIR/score_queue/$EVENT_ID"
-BEST_DIR="$EVENT_DIR/best_snapshots/$EVENT_ID"
-BEST_CURRENT="$BEST_DIR/current_best.jpg"
-FLUSH_FILE="$QUEUE_DIR/flush"
-FLUSHED_FILE="$QUEUE_DIR/flushed"
+# Freeze a copy of the event's snapshots (everything not newer than cutoff)
+find "$SNAPDIR" -maxdepth 1 -type f -name "*.jpg" ! -newer "$CUTOFF_FILE" -exec cp -a {} "$WORKDIR/snapshots/" \; || true
 
-mkdir -p "$QUEUE_DIR" "$BEST_DIR" || true
-touch "$FLUSH_FILE" || true
-
-# Wait briefly for worker flush; fallback to batch selection if not available.
-for _ in {1..60}; do
-  if [ -f "$FLUSHED_FILE" ] && [ -f "$BEST_CURRENT" ]; then
-    break
-  fi
-  sleep 0.5
-done
-
-OUT="$BEST_CURRENT"
+OUT="$WORKDIR/best_snapshot.jpg"
 
 # Optional debug: write annotated scored frames to a persistent directory so you can
 # watch the scoring live even though snapshots are stored in tmpfs and get cleared.
 # Enable by exporting MOTION_DEBUG_SCORING=1 in the motion service environment.
 DEBUG_ARGS=()
 if [ "${MOTION_DEBUG_SCORING:-0}" = "1" ]; then
-  DEBUG_ROOT="/var/lib/motion/debug_scoring"
-  DEBUG_DIR="$DEBUG_ROOT/$(basename "$WORKDIR")"
+  DEBUG_DIR="/var/lib/motion/debug_scoring/$(basename "$WORKDIR")"
   mkdir -p "$DEBUG_DIR" || true
-  # Stable pointer for viewing without hunting random eventproc.* directory names.
-  ln -sfn "$DEBUG_DIR" "$DEBUG_ROOT/latest" || true
   DEBUG_ARGS+=( --debug-write-frames --debug-out-dir "$DEBUG_DIR" --debug-max-frames 600 )
 fi
 
-# Fallback: if worker didn't flush or no best was produced, run the selector at event end.
-if [ ! -f "$OUT" ]; then
-  # Freeze a copy of the event's snapshots (everything not newer than cutoff)
-  find "$SNAPDIR" -maxdepth 1 -type f -name "*.jpg" ! -newer "$CUTOFF_FILE" -exec cp -a {} "$WORKDIR/snapshots/" \; || true
-  OUT="$WORKDIR/best_snapshot.jpg"
+# Analyze only the frozen copies (reuse live-score cache when available)
 /usr/local/bin/select_best_snapshot.py \
   --snapshot-dir "$WORKDIR/snapshots" \
   --output-file "$OUT" \
+  --cache-db "$CACHE_DB" \
   "${DEBUG_ARGS[@]}"
-fi
 
 # Email THIS event's best snapshot (path passed in)
 /usr/local/bin/motion_email_alert.sh "$OUT"
@@ -84,3 +65,6 @@ fi
 find "$SNAPDIR" -maxdepth 1 -type f -name "*.jpg" ! -newer "$CUTOFF_FILE" -delete || true
 
 exit 0
+
+
+

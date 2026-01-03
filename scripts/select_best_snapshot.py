@@ -2,6 +2,7 @@
 
 import argparse
 import cv2
+import json
 import os
 import math
 import logging
@@ -251,6 +252,56 @@ def maybe_write_debug_frame(path, tier, score, idx=None):
         pass
 
 
+def write_annotated_best(src_path: str, tier: int, score: float, out_path: str) -> bool:
+    """
+    Always write an annotated copy of the chosen best frame (independent of debug caps),
+    so the email pipeline can attach a deterministic 'best_snapshot.annotated.jpg'.
+    """
+    try:
+        img = cv2.imread(src_path)
+        if img is None:
+            return False
+
+        # Tier/score banner
+        label = f"T{int(tier)} score={float(score):.3f}"
+        cv2.rectangle(img, (0, 0), (img.shape[1], 70), (0, 0, 0), -1)
+        cv2.putText(img, label, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2, cv2.LINE_AA)
+
+        # Face boxes (helps interpret why a frame was selected)
+        try:
+            det_img, _ = preprocess_for_face(img)
+            faces = detect_faces(det_img)
+            for (x, y, w, h, conf) in faces:
+                cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                if conf > 0:
+                    conf_n = max(0.0, min(1.0, float(conf)))
+                    cv2.putText(img, f"{conf_n:.2f}", (x, max(0, y - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+        except Exception:
+            pass
+
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        tmp_dir = os.path.dirname(out_path) or "."
+        with tempfile.NamedTemporaryFile(dir=tmp_dir, delete=False, suffix=".jpg") as tmp:
+            tmp_name = tmp.name
+        try:
+            if not cv2.imwrite(tmp_name, img):
+                try:
+                    os.unlink(tmp_name)
+                except Exception:
+                    pass
+                return False
+            os.replace(tmp_name, out_path)
+            return True
+        finally:
+            try:
+                if os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
+            except Exception:
+                pass
+    except Exception:
+        return False
+
+
 def score_image(path):
     img = load_img(path)
     if img is None:
@@ -388,6 +439,36 @@ if best_file:
             os.replace(tmp.name, OUTPUT_FILE)
 
         logging.info(f"BEST={best_file} score={best_score}")
+
+        # Write deterministic metadata + annotated copy for downstream email/debugging.
+        try:
+            meta_path = OUTPUT_FILE + ".meta.json"
+            ann_path = OUTPUT_FILE + ".annotated.jpg"
+            tier_i = int(best_score[0])
+            score_f = float(best_score[1])
+
+            payload = {
+                "best_source_file": str(best_file),
+                "best_source_basename": os.path.basename(str(best_file)),
+                "tier": tier_i,
+                "score": score_f,
+                "output_file": str(OUTPUT_FILE),
+                "annotated_file": str(ann_path),
+                "ts": float(time.time()),
+            }
+
+            os.makedirs(os.path.dirname(meta_path) or ".", exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=os.path.dirname(meta_path) or ".", delete=False, mode="w") as tmpj:
+                json.dump(payload, tmpj, indent=2, sort_keys=True)
+                tmpj.flush()
+                os.fsync(tmpj.fileno())
+                os.replace(tmpj.name, meta_path)
+
+            # Always write an annotated copy of the BEST frame (even if debug max frames was reached).
+            if not write_annotated_best(str(best_file), tier_i, score_f, ann_path):
+                logging.warning(f"Failed to write annotated best snapshot to {ann_path}")
+        except Exception as e:
+            logging.exception(f"Failed to write best metadata/annotated snapshot: {e}")
 
     except Exception as e:
         logging.exception(f"Failed to write best snapshot: {e}")
