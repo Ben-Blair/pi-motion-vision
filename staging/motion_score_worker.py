@@ -41,6 +41,13 @@ T2_STABILITY_IOU = float(os.environ.get("MOTION_T2_STABILITY_IOU", "0.30"))
 T2_STABILITY_MIN_MATCHES = int(os.environ.get("MOTION_T2_STABILITY_MIN_MATCHES", "2"))
 T2_STABILITY_MIN_SPAN_SECS = float(os.environ.get("MOTION_T2_STABILITY_MIN_SPAN_SECS", "1.0"))
 
+# EventState cleanup
+EVENT_STATE_CLEANUP_GRACE_SECS = float(os.environ.get("MOTION_EVENT_STATE_CLEANUP_GRACE_SECS", "300"))  # 5 minutes
+
+# Tier-1 stability gating (simpler than T2: 2 matches, no time spread)
+T1_STABILITY_IOU = float(os.environ.get("MOTION_T1_STABILITY_IOU", "0.30"))
+T1_STABILITY_MIN_MATCHES = int(os.environ.get("MOTION_T1_STABILITY_MIN_MATCHES", "2"))
+
 
 def atomic_write_json(path: str, payload: dict):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -147,6 +154,11 @@ class EventState:
     debug_seen: int = 0
     # recent Tier-2 detections: list of (ts, bbox)
     recent_t2: list = None
+    # recent Tier-1 detections: list of timestamps (no bbox needed)
+    recent_t1: list = None
+    # Track last activity for cleanup
+    last_activity_ts: float = 0.0
+    flushed: bool = False
 
 
 def make_scorer(logger):
@@ -197,6 +209,9 @@ def open_event_state(event_id: str, logger) -> EventState:
         last_prune_ts=now,
     )
     st.recent_t2 = []
+    st.recent_t1 = []
+    st.last_activity_ts = now
+    st.flushed = False
     # Live debug directory (tmpfs)
     if DEBUG_LIVE_ENABLED:
         try:
@@ -217,6 +232,16 @@ def open_event_state(event_id: str, logger) -> EventState:
         except Exception:
             st.debug_dir = ""
     return st
+
+
+def close_event_state(st: EventState, logger):
+    """Close SQLite connection and clean up resources for an event state."""
+    try:
+        if st.conn:
+            st.conn.close()
+    except Exception as e:
+        logger.warning(f"Error closing connection for {st.event_id}: {e}")
+    # Scorer cleanup is handled by Python GC
 
 
 def _iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
@@ -276,6 +301,26 @@ def _t2_is_stable(st: EventState, bbox_xywh: Tuple[int, int, int, int]) -> Tuple
             return (False, matches)
     
     return (True, matches)
+
+
+def _t1_is_stable(st: EventState) -> Tuple[bool, int]:
+    """
+    Returns (stable, matches) for Tier-1 detections.
+    Simpler than T2: requires 2 matches within window, no bbox matching needed.
+    """
+    now = time.time()
+    # Use same window as T2 for consistency
+    win = max(0.0, float(T2_STABILITY_WINDOW_SECS))
+    # Prune old
+    if st.recent_t1 is None:
+        st.recent_t1 = []
+    st.recent_t1 = [ts for ts in st.recent_t1 if (now - ts) <= win]
+
+    matches = len(st.recent_t1) + 1  # Current frame counts as 1
+    # Record this detection for future frames
+    st.recent_t1.append(now)
+    need = max(1, int(T1_STABILITY_MIN_MATCHES))
+    return (matches >= need, matches)
 
 
 def should_checkpoint(st: EventState, *, best_updated: bool) -> bool:
@@ -378,6 +423,9 @@ def read_queue_item(path: str) -> Optional[str]:
 
 
 def process_snapshot(st: EventState, snap_path: str, logger) -> bool:
+    # Update last activity timestamp
+    st.last_activity_ts = time.time()
+    
     base = os.path.basename(snap_path)
     if not sbs.SNAPSHOT_RE.match(base):
         return False
@@ -422,6 +470,20 @@ def process_snapshot(st: EventState, snap_path: str, logger) -> bool:
                 best_updated = True
         elif int(tier) == 2:
             logger.info(f"T2_UNSTABLE event={st.event_id} {snap_path} score={score} matches=0 reason=no_bbox")
+        elif int(tier) == 1:
+            # Apply T1 stability gate
+            stable, matches = _t1_is_stable(st)
+            if not stable:
+                logger.info(
+                    f"T1_UNSTABLE event={st.event_id} {snap_path} score={score} matches={matches} window={T2_STABILITY_WINDOW_SECS}s"
+                )
+            else:
+                logger.info(
+                    f"T1_STABLE event={st.event_id} {snap_path} score={score} matches={matches} window={T2_STABILITY_WINDOW_SECS}s"
+                )
+                st.best = (int(tier), float(score))
+                st.best_source = base
+                best_updated = True
         else:
             st.best = (int(tier), float(score))
             st.best_source = base
@@ -449,6 +511,20 @@ def process_snapshot(st: EventState, snap_path: str, logger) -> bool:
             elif int(tier) == 2:
                 # Tier-2 but no bbox (should be rare); treat as unstable.
                 logger.info(f"T2_UNSTABLE event={st.event_id} {snap_path} score={score} matches=0 reason=no_bbox")
+            elif int(tier) == 1:
+                # Apply T1 stability gate
+                stable, matches = _t1_is_stable(st)
+                if not stable:
+                    logger.info(
+                        f"T1_UNSTABLE event={st.event_id} {snap_path} score={score} matches={matches} window={T2_STABILITY_WINDOW_SECS}s"
+                    )
+                else:
+                    logger.info(
+                        f"T1_STABLE event={st.event_id} {snap_path} score={score} matches={matches} window={T2_STABILITY_WINDOW_SECS}s"
+                    )
+                    st.best = cand
+                    st.best_source = base
+                    best_updated = True
             else:
                 st.best = cand
                 st.best_source = base
@@ -584,6 +660,8 @@ def main():
                         did_work = True
 
                 checkpoint_best(st, log, final=True)
+                st.flushed = True
+                st.last_activity_ts = time.time()
                 try:
                     with open(flushed_path, "w", encoding="utf-8") as f:
                         f.write(str(time.time()))
@@ -593,6 +671,45 @@ def main():
                     os.unlink(flush_path)
                 except Exception:
                     pass
+                
+                # Clean up queue directory after flush
+                try:
+                    # Remove any remaining .q files
+                    remaining_q = [f for f in os.listdir(qdir) if f.endswith(".q")]
+                    for qf in remaining_q:
+                        try:
+                            os.unlink(os.path.join(qdir, qf))
+                        except Exception:
+                            pass
+                    # Remove queue directory if empty or only contains flush markers
+                    remaining = [f for f in os.listdir(qdir) if f not in ("flush", "flushed")]
+                    if not remaining:
+                        try:
+                            os.rmdir(qdir)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+        # Clean up stale event states (flushed + grace period expired)
+        now = time.time()
+        stale_events = []
+        for eid, st in list(states.items()):
+            if st.flushed and (now - st.last_activity_ts) > EVENT_STATE_CLEANUP_GRACE_SECS:
+                stale_events.append(eid)
+        
+        for eid in stale_events:
+            log.info(f"CLEANUP_STATE event={eid} age={now - states[eid].last_activity_ts:.1f}s")
+            close_event_state(states[eid], log)
+            del states[eid]
+
+        # Touch health indicator file
+        try:
+            health_file = os.path.join(EVENT_DIR, ".worker_health")
+            with open(health_file, "w") as f:
+                f.write(str(now))
+        except Exception:
+            pass
 
         if not did_work:
             time.sleep(0.25)

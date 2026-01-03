@@ -20,33 +20,88 @@ trap cleanup EXIT
 
 mkdir -p "$WORKDIR/snapshots"
 
-# Identify event id (used for per-event best artifacts)
-EVENT_ID="unknown"
-if [ -r "$EVENT_ID_FILE" ]; then
-  EVENT_ID="$(tr -d '\r\n' < "$EVENT_ID_FILE")"
-fi
-
 # Cutoff marker: anything newer than this belongs to a newer event and must not be deleted.
 CUTOFF_FILE="$WORKDIR/cutoff"
 touch "$CUTOFF_FILE"
 
+# Find the most recently flushed event (the one that just ended)
+# This is more reliable than using current_event_id which may have already been updated to a new event
+BEST_SNAPSHOTS_ROOT="$EVENT_DIR/best_snapshots"
+EVENT_ID="unknown"
+BEST_CURRENT=""
+
+# Look for the most recent metadata file that was modified within the last 5 minutes
+# The metadata file is updated when the worker does a final checkpoint, so it's more accurate
+NOW=$(date +%s)
+RECENT_THRESHOLD=$((NOW - 300))  # 5 minutes ago
+
+if [ -d "$BEST_SNAPSHOTS_ROOT" ]; then
+  # Find the MOST RECENT current_best.jpg (regardless of final status)
+  # Prioritize final checkpoints, but use most recent if no final found
+  BEST_META_TIME=0
+  BEST_META_FILE=""
+  BEST_META_EVENT=""
+  
+  # First pass: find most recent metadata file (final or not)
+  while IFS= read -r meta_file; do
+    if [ -f "$meta_file" ]; then
+      mtime=$(stat -c %Y "$meta_file" 2>/dev/null || echo 0)
+      if [ "$mtime" -gt "$RECENT_THRESHOLD" ] && [ "$mtime" -gt "$BEST_META_TIME" ]; then
+        event_dir=$(dirname "$meta_file")
+        candidate_id=$(basename "$event_dir")
+        if [ -n "$candidate_id" ] && [ "$candidate_id" != "best_snapshots" ]; then
+          BEST_META_TIME=$mtime
+          BEST_META_FILE="$meta_file"
+          BEST_META_EVENT="$candidate_id"
+        fi
+      fi
+    fi
+  done < <(find "$BEST_SNAPSHOTS_ROOT" -name "current_best.jpg.meta.json" -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | awk '{print $2}')
+  
+  # Use the most recent metadata file found (even if final=false)
+  if [ -n "$BEST_META_FILE" ] && [ -f "$BEST_META_FILE" ]; then
+    EVENT_ID="$BEST_META_EVENT"
+    BEST_CURRENT="$(dirname "$BEST_META_FILE")/current_best.jpg"
+  fi
+fi
+
+# Fallback: if no recent best found, try using current_event_id (for backward compatibility)
+if [ "$EVENT_ID" = "unknown" ] || [ ! -f "$BEST_CURRENT" ]; then
+  if [ -r "$EVENT_ID_FILE" ]; then
+    EVENT_ID="$(tr -d '\r\n' < "$EVENT_ID_FILE")"
+    BEST_DIR="$EVENT_DIR/best_snapshots/$EVENT_ID"
+    BEST_CURRENT="$BEST_DIR/current_best.jpg"
+  fi
+fi
+
 # Ask the live scoring worker to flush the final best (low SD writes during event, final commit now).
 QUEUE_DIR="$EVENT_DIR/score_queue/$EVENT_ID"
-BEST_DIR="$EVENT_DIR/best_snapshots/$EVENT_ID"
-BEST_CURRENT="$BEST_DIR/current_best.jpg"
 FLUSH_FILE="$QUEUE_DIR/flush"
 FLUSHED_FILE="$QUEUE_DIR/flushed"
 
-mkdir -p "$QUEUE_DIR" "$BEST_DIR" || true
+mkdir -p "$QUEUE_DIR" "$(dirname "$BEST_CURRENT" 2>/dev/null || echo "$EVENT_DIR")" || true
 touch "$FLUSH_FILE" || true
 
-# Wait briefly for worker flush; fallback to batch selection if not available.
-for _ in {1..60}; do
-  if [ -f "$FLUSHED_FILE" ] && [ -f "$BEST_CURRENT" ]; then
-    break
+# Check worker health before waiting
+WORKER_HEALTH_FILE="$EVENT_DIR/.worker_health"
+WORKER_HEALTHY=false
+if [ -f "$WORKER_HEALTH_FILE" ]; then
+  HEALTH_AGE=$(($(date +%s) - $(stat -c %Y "$WORKER_HEALTH_FILE" 2>/dev/null || echo 0)))
+  if [ "$HEALTH_AGE" -lt 5 ]; then
+    WORKER_HEALTHY=true
   fi
-  sleep 0.5
-done
+fi
+
+# Wait briefly for worker flush; fallback to batch selection if not available.
+# Skip wait if worker is not healthy.
+if [ "$WORKER_HEALTHY" = "true" ]; then
+  for _ in {1..60}; do
+    if [ -f "$FLUSHED_FILE" ] && [ -f "$BEST_CURRENT" ]; then
+      break
+    fi
+    sleep 0.5
+  done
+fi
 
 OUT="$BEST_CURRENT"
 
@@ -76,6 +131,17 @@ fi
 
 # Email THIS event's best snapshot (path passed in)
 /usr/local/bin/motion_email_alert.sh "$OUT"
+
+# Clean up queue directory (safety net if worker didn't clean it up)
+if [ -d "$QUEUE_DIR" ]; then
+  # Remove any remaining .q files
+  find "$QUEUE_DIR" -maxdepth 1 -name "*.q" -delete 2>/dev/null || true
+  # Remove queue directory if empty or only contains flush markers
+  remaining=$(find "$QUEUE_DIR" -maxdepth 1 -mindepth 1 ! -name "flush" ! -name "flushed" 2>/dev/null | wc -l)
+  if [ "$remaining" -eq 0 ]; then
+    rm -rf "$QUEUE_DIR" 2>/dev/null || true
+  fi
+fi
 
 # Housekeeping (mp4 pruning, etc.)
 /usr/local/bin/motion_cleanup.sh
