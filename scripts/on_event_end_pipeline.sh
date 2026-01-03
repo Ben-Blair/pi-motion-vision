@@ -92,18 +92,16 @@ if [ -f "$WORKER_HEALTH_FILE" ]; then
   fi
 fi
 
-# Wait briefly for worker flush; fallback to batch selection if not available.
+# Wait briefly for worker flush (for cleanup, but we'll use batch selection for best snapshot).
 # Skip wait if worker is not healthy.
 if [ "$WORKER_HEALTHY" = "true" ]; then
   for _ in {1..60}; do
-    if [ -f "$FLUSHED_FILE" ] && [ -f "$BEST_CURRENT" ]; then
+    if [ -f "$FLUSHED_FILE" ]; then
       break
     fi
     sleep 0.5
   done
 fi
-
-OUT="$BEST_CURRENT"
 
 # Optional debug: write annotated scored frames to a persistent directory so you can
 # watch the scoring live even though snapshots are stored in tmpfs and get cleared.
@@ -118,16 +116,15 @@ if [ "${MOTION_DEBUG_SCORING:-0}" = "1" ]; then
   DEBUG_ARGS+=( --debug-write-frames --debug-out-dir "$DEBUG_DIR" --debug-max-frames 600 )
 fi
 
-# Fallback: if worker didn't flush or no best was produced, run the selector at event end.
-if [ ! -f "$OUT" ]; then
-  # Freeze a copy of the event's snapshots (everything not newer than cutoff)
-  find "$SNAPDIR" -maxdepth 1 -type f -name "*.jpg" ! -newer "$CUTOFF_FILE" -exec cp -a {} "$WORKDIR/snapshots/" \; || true
-  OUT="$WORKDIR/best_snapshot.jpg"
+# Always run batch selection at event end to get the true best snapshot (no stability gates).
+# This ensures we select the highest-scoring frame regardless of stability gate filtering.
+# Freeze a copy of the event's snapshots (everything not newer than cutoff)
+find "$SNAPDIR" -maxdepth 1 -type f -name "*.jpg" ! -newer "$CUTOFF_FILE" -exec cp -a {} "$WORKDIR/snapshots/" \; || true
+OUT="$WORKDIR/best_snapshot.jpg"
 /usr/local/bin/select_best_snapshot.py \
   --snapshot-dir "$WORKDIR/snapshots" \
   --output-file "$OUT" \
   "${DEBUG_ARGS[@]}"
-fi
 
 # Email THIS event's best snapshot (path passed in)
 /usr/local/bin/motion_email_alert.sh "$OUT"

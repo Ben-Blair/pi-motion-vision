@@ -542,8 +542,8 @@ def process_snapshot(st: EventState, snap_path: str, logger) -> bool:
     # Live debug output for the web viewer
     maybe_write_live_debug_frame(st, snap_path, int(tier), float(score))
 
-    if should_checkpoint(st, best_updated=best_updated):
-        checkpoint_best(st, logger, final=False)
+    # Periodic checkpointing disabled - best snapshot kept in memory until event end
+    # Final checkpoint will be done on flush request to minimize SD writes
 
     # Periodic pruning (cheap enough)
     now = time.time()
