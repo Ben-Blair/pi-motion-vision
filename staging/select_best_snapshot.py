@@ -16,7 +16,8 @@ from typing import Optional, Tuple
 # Filename format from Motion: %Y%m%d-%H%M%S-%q.jpg (e.g. 20260102-123456-01.jpg)
 SNAPSHOT_RE = re.compile(r"^\d{8}-\d{6}-\d{2}\.jpg$")
 
-DEFAULT_LOG_FILE = "/var/lib/motion/motion_snapshot_selector.log"
+LOG_DIR = "/dev/shm/motion_logs"  # tmpfs log directory (reduces SD card writes)
+DEFAULT_LOG_FILE = os.path.join(LOG_DIR, "motion_snapshot_selector.log")
 DEFAULT_YUNET_MODEL = "/var/lib/motion/models/face_detection_yunet_2023mar.onnx"
 
 

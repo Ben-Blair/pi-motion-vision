@@ -18,6 +18,7 @@ import select_best_snapshot as sbs  # noqa: E402
 EVENT_DIR = "/var/lib/motion"
 EVENT_ID_FILE = os.path.join(EVENT_DIR, "current_event_id")
 SNAPSHOT_DIR = os.path.join(EVENT_DIR, "snapshots")
+LOG_DIR = "/dev/shm/motion_logs"  # tmpfs log directory (reduces SD card writes)
 
 QUEUE_ROOT = os.path.join(EVENT_DIR, "score_queue")
 BEST_ROOT = os.path.join(EVENT_DIR, "best_snapshots")
@@ -534,7 +535,7 @@ def process_snapshot(st: EventState, snap_path: str, logger) -> bool:
     logger.info(f"SCORED event={st.event_id} {snap_path} T{tier} score={score}")
     # Also append a simple line to the legacy live scoring log for easy tailing.
     try:
-        with open(os.path.join(EVENT_DIR, "live_snapshot_scoring.log"), "a", encoding="utf-8") as f:
+        with open(os.path.join(LOG_DIR, "live_snapshot_scoring.log"), "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} SCORED {snap_path} T{tier} score={score}\n")
     except Exception:
         pass
@@ -573,8 +574,14 @@ def main():
         except Exception:
             pass
 
+    # Ensure log directory exists
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+    except Exception:
+        pass  # Fallback to EVENT_DIR if tmpfs unavailable
+    
     logging.basicConfig(
-        filename=os.path.join(EVENT_DIR, "motion_score_worker.log"),
+        filename=os.path.join(LOG_DIR, "motion_score_worker.log"),
         level=logging.INFO,
         format="%(asctime)s %(message)s",
     )
@@ -583,8 +590,8 @@ def main():
 
     # Ensure the legacy live scoring log exists so tools that tail it keep working.
     try:
-        os.makedirs(EVENT_DIR, exist_ok=True)
-        open(os.path.join(EVENT_DIR, "live_snapshot_scoring.log"), "a").close()
+        os.makedirs(LOG_DIR, exist_ok=True)
+        open(os.path.join(LOG_DIR, "live_snapshot_scoring.log"), "a").close()
     except Exception:
         pass
 

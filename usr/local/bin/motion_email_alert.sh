@@ -29,9 +29,22 @@ if [ "$TEST_MODE" = "1" ]; then
     COOLDOWN_SECONDS=0
 fi
 
+# =========================
+# Email mode (debug or user)
+# Read from config file first, then environment, then default to user
+# =========================
+EMAIL_MODE_CONFIG="/var/lib/motion/.email_mode"
+if [ -f "$EMAIL_MODE_CONFIG" ]; then
+    EMAIL_MODE="$(tr -d '
+ ' < "$EMAIL_MODE_CONFIG" 2>/dev/null || echo "user")"
+else
+    EMAIL_MODE="${EMAIL_MODE:-user}"
+fi
+
+
 NOW=$(date +%s)
 
-logger -t "$LOG_TAG" "Hook started (TEST_MODE=$TEST_MODE)"
+logger -t "$LOG_TAG" "Hook started (TEST_MODE=$TEST_MODE, EMAIL_MODE=$EMAIL_MODE)"
 
 # =========================
 # Cooldown check
@@ -121,10 +134,14 @@ fi
 
 # =========================
 # Send email
+    logger -t "$LOG_TAG" "DEBUG: Setting USER mode variables"
+
 # =========================
 if [ "$TEST_MODE" = "0" ]; then
     SUBJECT="${SUBJECT}${BEST_META_SUBJ}"
     logger -t "$LOG_TAG" "Sending email with attachment $BEST_SNAPSHOT"
+    logger -t "$LOG_TAG" "DEBUG: USER_SUBJECT=$USER_SUBJECT, USER_BODY length=${#USER_BODY}"
+
     {
         echo "Subject: $SUBJECT"
         echo "To: $TO_EMAIL"
@@ -133,6 +150,8 @@ if [ "$TEST_MODE" = "0" ]; then
         echo
         echo "--BOUNDARY"
         echo "Content-Type: text/plain"
+    logger -t "$LOG_TAG" "DEBUG: EMAIL_MODE=$EMAIL_MODE, USER_SUBJECT=$USER_SUBJECT, USER_BODY length=${#USER_BODY}"
+
         echo
         echo "$BODY"
         if [ -n "$BEST_META_TEXT" ]; then
@@ -153,7 +172,7 @@ if [ "$TEST_MODE" = "0" ]; then
         if [ -f "$RAW_ARCHIVE" ]; then
             base64 "$RAW_ARCHIVE"
         else
-        base64 "$BEST_SNAPSHOT"
+            base64 "$BEST_SNAPSHOT"
         fi
         echo
 
