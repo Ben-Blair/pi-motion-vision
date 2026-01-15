@@ -134,39 +134,40 @@ fi
 
 # =========================
 # Send email
-    logger -t "$LOG_TAG" "DEBUG: Setting USER mode variables"
-
 # =========================
 if [ "$TEST_MODE" = "0" ]; then
     SUBJECT="${SUBJECT}${BEST_META_SUBJ}"
-    logger -t "$LOG_TAG" "Sending email with attachment $BEST_SNAPSHOT"
-    logger -t "$LOG_TAG" "DEBUG: USER_SUBJECT=$USER_SUBJECT, USER_BODY length=${#USER_BODY}"
+    logger -t "$LOG_TAG" "Sending email with inline image $BEST_SNAPSHOT"
 
     {
         echo "Subject: $SUBJECT"
         echo "To: $TO_EMAIL"
         echo "MIME-Version: 1.0"
-        echo "Content-Type: multipart/mixed; boundary=\"BOUNDARY\""
+        echo "Content-Type: multipart/related; boundary=\"BOUNDARY\""
         echo
         echo "--BOUNDARY"
-        echo "Content-Type: text/plain"
-    logger -t "$LOG_TAG" "DEBUG: EMAIL_MODE=$EMAIL_MODE, USER_SUBJECT=$USER_SUBJECT, USER_BODY length=${#USER_BODY}"
-
+        echo "Content-Type: text/html; charset=\"utf-8\""
         echo
-        echo "$BODY"
+        echo "<html>"
+        echo "<body>"
+        echo "<p>${BODY}</p>"
         if [ -n "$BEST_META_TEXT" ]; then
-            echo
+            echo "<pre>"
             echo "$BEST_META_TEXT"
+            echo "</pre>"
         fi
         if [ -d "$ARCHIVE_DIR" ]; then
-            echo
-            echo "Archive: $ARCHIVE_DIR"
+            echo "<p>Archive: $ARCHIVE_DIR</p>"
         fi
+        echo "<p><img src=\"cid:SNAPSHOTIMG\" style=\"max-width:100%; height:auto;\"></p>"
+        echo "</body>"
+        echo "</html>"
         echo
         echo "--BOUNDARY"
         echo "Content-Type: image/jpeg"
-        echo "Content-Disposition: attachment; filename=\"best_snapshot.jpg\""
+        echo "Content-Disposition: inline; filename=\"best_snapshot.jpg\""
         echo "Content-Transfer-Encoding: base64"
+        echo "Content-ID: <SNAPSHOTIMG>"
         echo
         # Prefer archived copy (persists after eventproc cleanup), fallback to original.
         if [ -f "$RAW_ARCHIVE" ]; then
