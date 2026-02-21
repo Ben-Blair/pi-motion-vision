@@ -3,6 +3,9 @@
 # Deploy Motion configuration and scripts from this repository
 # into the live system (/etc/motion and /usr/local/bin).
 #
+# To edit config directly (no copy/sync): run scripts/link_motion_config_to_repo.sh
+# once; then edits under etc/motion/ are live and you only need to restart motion.
+#
 # Usage:
 #   cd ~/pi-motion-vision
 #   ./deploy_to_live.sh
@@ -21,7 +24,16 @@ echo
 echo "Step 1/3: Copying Motion config files into /etc/motion..."
 sudo mkdir -p /etc/motion
 if compgen -G "$REPO_DIR/etc/motion/*.conf" > /dev/null; then
-  sudo cp "$REPO_DIR"/etc/motion/*.conf /etc/motion/
+  for src in "$REPO_DIR"/etc/motion/*.conf; do
+    base="$(basename "$src")"
+    dst="/etc/motion/$base"
+    # If /etc/motion is symlinked back to this repo file, skip (cp would fail with "same file").
+    if [ -e "$dst" ] && [ "$(readlink -f "$src")" = "$(readlink -f "$dst")" ]; then
+      echo "  Skipping $base (already linked to repo file)"
+      continue
+    fi
+    sudo cp "$src" "$dst"
+  done
 else
   echo "  (No *.conf files found under etc/motion in the repo.)"
 fi
@@ -39,6 +51,14 @@ if [ -d "$REPO_DIR/usr/local/bin" ]; then
   sudo mkdir -p /usr/local/bin
   sudo cp "$REPO_DIR"/usr/local/bin/motion_*.sh /usr/local/bin/
   sudo chmod 755 /usr/local/bin/motion_*.sh
+  if [ -f "$REPO_DIR/usr/local/bin/on_picture_save_score.sh" ]; then
+    sudo cp "$REPO_DIR/usr/local/bin/on_picture_save_score.sh" /usr/local/bin/
+    sudo chmod 755 /usr/local/bin/on_picture_save_score.sh
+  fi
+  if compgen -G "$REPO_DIR/usr/local/bin/motion_*.py" > /dev/null; then
+    sudo cp "$REPO_DIR"/usr/local/bin/motion_*.py /usr/local/bin/
+    sudo chmod 755 /usr/local/bin/motion_*.py
+  fi
 fi
 
 echo

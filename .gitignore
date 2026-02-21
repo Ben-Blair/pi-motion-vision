@@ -6,3 +6,7 @@ backup/
 backup/
 motion.conf
 camera0.conf
+
+# Local dataset / sample captures
+bed-dataset/
+sample.jpg
