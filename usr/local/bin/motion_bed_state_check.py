@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -278,7 +279,11 @@ def score_image(ckpt_path: str, image_path: str, image_size: int) -> float:
     engine = Engine()
     model = Patchcore()
     dataset = PredictDataset(path=image_path, image_size=(image_size, image_size))
-    preds = engine.predict(model=model, dataset=dataset, ckpt_path=ckpt_path)
+    try:
+        preds = engine.predict(model=model, dataset=dataset, ckpt_path=ckpt_path)
+    finally:
+        # Prevent long-term growth from Anomalib prediction artifacts.
+        shutil.rmtree("results", ignore_errors=True)
     if not preds:
         raise RuntimeError("No prediction returned by anomalib.")
     return float(preds[0].pred_score)

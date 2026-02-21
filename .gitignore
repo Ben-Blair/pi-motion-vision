@@ -10,3 +10,8 @@ camera0.conf
 # Local dataset / sample captures
 bed-dataset/
 sample.jpg
+
+# Generated runtime artifacts
+results/
+**/__pycache__/
+*.pyc
