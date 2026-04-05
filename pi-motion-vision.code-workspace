@@ -1,0 +1,13 @@
+{
+  "folders": [
+    {
+      "name": "pi-motion-vision",
+      "path": "."
+    },
+    {
+      "name": "Motion recordings (MP4)",
+      "path": "/var/lib/motion/videos"
+    }
+  ],
+  "settings": {}
+}

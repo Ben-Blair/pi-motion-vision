@@ -30,6 +30,10 @@ WORK_DIR=/home/bblair23/bed-model/work
 T_LOW=0.25
 T_HIGH=0.40
 CONFIRM_COUNT=2
+REQUIRE_SECOND_CHECK_FOR_EMAIL=1
+DOUBLE_CHECK_DELAY_SEC=300
+MANUAL_SESSION_FILE=/dev/shm/motion_bed_manual_session.json
+MANUAL_EXPIRE_SEC=300
 MASK_POLYGON=0
 PAD=0
 CHECK_INTERVAL_MINUTES=5
@@ -39,6 +43,20 @@ EOF
 else
   echo "Keeping existing env file: $ENV_FILE"
 fi
+
+ensure_env_key() {
+  local key="$1"
+  local value="$2"
+  if ! sudo grep -q "^${key}=" "$ENV_FILE"; then
+    echo "Adding missing ${key} to $ENV_FILE"
+    echo "${key}=${value}" | sudo tee -a "$ENV_FILE" >/dev/null
+  fi
+}
+
+ensure_env_key "REQUIRE_SECOND_CHECK_FOR_EMAIL" "1"
+ensure_env_key "DOUBLE_CHECK_DELAY_SEC" "300"
+ensure_env_key "MANUAL_SESSION_FILE" "/dev/shm/motion_bed_manual_session.json"
+ensure_env_key "MANUAL_EXPIRE_SEC" "300"
 
 sudo tee "$SERVICE_FILE" >/dev/null <<'EOF'
 [Unit]
@@ -50,7 +68,8 @@ Wants=network-online.target
 Type=oneshot
 EnvironmentFile=/etc/default/motion-bed-state
 WorkingDirectory=/home/bblair23/bed-model
-ExecStart=/usr/bin/python3 /usr/local/bin/motion_bed_state_check.py --model-ckpt ${MODEL_CKPT} --frame-file ${FRAME_FILE} --frame-url ${FRAME_URL} --state-file ${STATE_FILE} --work-dir ${WORK_DIR} --t-low ${T_LOW} --t-high ${T_HIGH} --confirm-count ${CONFIRM_COUNT} --roi-meta ${ROI_META} --pad ${PAD} --mask-polygon
+TimeoutStartSec=20min
+ExecStart=/bin/bash -lc 'if [ "${REQUIRE_SECOND_CHECK_FOR_EMAIL:-0}" = "1" ]; then exec /usr/bin/python3 /usr/local/bin/motion_bed_state_check.py --model-ckpt "${MODEL_CKPT}" --frame-file "${FRAME_FILE}" --frame-url "${FRAME_URL}" --state-file "${STATE_FILE}" --work-dir "${WORK_DIR}" --t-low "${T_LOW}" --t-high "${T_HIGH}" --confirm-count "${CONFIRM_COUNT}" --double-check-delay-sec "${DOUBLE_CHECK_DELAY_SEC}" --require-second-check-for-email --roi-meta "${ROI_META}" --pad "${PAD}" --mask-polygon; else exec /usr/bin/python3 /usr/local/bin/motion_bed_state_check.py --model-ckpt "${MODEL_CKPT}" --frame-file "${FRAME_FILE}" --frame-url "${FRAME_URL}" --state-file "${STATE_FILE}" --work-dir "${WORK_DIR}" --t-low "${T_LOW}" --t-high "${T_HIGH}" --confirm-count "${CONFIRM_COUNT}" --double-check-delay-sec "${DOUBLE_CHECK_DELAY_SEC}" --roi-meta "${ROI_META}" --pad "${PAD}" --mask-polygon; fi'
 ExecStartPost=/bin/true
 User=bblair23
 Group=bblair23

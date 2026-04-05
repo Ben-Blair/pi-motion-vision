@@ -3,8 +3,9 @@
 # Deploy Motion configuration and scripts from this repository
 # into the live system (/etc/motion and /usr/local/bin).
 #
-# To edit config directly (no copy/sync): run scripts/link_motion_config_to_repo.sh
-# once; then edits under etc/motion/ are live and you only need to restart motion.
+# For daily editing in Cursor with no copy step: run scripts/link_repo_to_live.sh
+# once (or scripts/link_motion_config_to_repo.sh — same thing). Then the repo is
+# the live config, hooks, and /usr/local/bin helpers via symlinks.
 #
 # Usage:
 #   cd ~/pi-motion-vision
@@ -55,6 +56,12 @@ if [ -d "$REPO_DIR/usr/local/bin" ]; then
     sudo cp "$REPO_DIR/usr/local/bin/on_picture_save_score.sh" /usr/local/bin/
     sudo chmod 755 /usr/local/bin/on_picture_save_score.sh
   fi
+  for hook in on_event_start on_event_end_pipeline on_movie_end; do
+    if [ -f "$REPO_DIR/scripts/${hook}.sh" ]; then
+      sudo cp "$REPO_DIR/scripts/${hook}.sh" "/usr/local/bin/${hook}.sh"
+      sudo chmod 755 "/usr/local/bin/${hook}.sh"
+    fi
+  done
   if compgen -G "$REPO_DIR/usr/local/bin/motion_*.py" > /dev/null; then
     sudo cp "$REPO_DIR"/usr/local/bin/motion_*.py /usr/local/bin/
     sudo chmod 755 /usr/local/bin/motion_*.py

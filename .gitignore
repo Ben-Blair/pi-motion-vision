@@ -11,6 +11,9 @@ camera0.conf
 bed-dataset/
 sample.jpg
 
+# Local symlink to live recordings (see pi-motion-vision.code-workspace)
+motion-videos
+
 # Generated runtime artifacts
 results/
 **/__pycache__/

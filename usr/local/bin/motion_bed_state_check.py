@@ -85,6 +85,33 @@ def parse_args() -> argparse.Namespace:
         help="Consecutive checks required before state change.",
     )
     p.add_argument(
+        "--double-check-delay-sec",
+        type=int,
+        default=300,
+        help="Delay between first and second check in seconds (default 5 minutes).",
+    )
+    p.add_argument(
+        "--require-second-check-for-email",
+        action="store_true",
+        help="Require second check agreement before sending email.",
+    )
+    p.add_argument(
+        "--manual-two-step",
+        action="store_true",
+        help="Manual testing mode: first run saves check, second run compares and can email.",
+    )
+    p.add_argument(
+        "--manual-session-file",
+        default="/dev/shm/motion_bed_manual_session.json",
+        help="Session file used by --manual-two-step to store the first run.",
+    )
+    p.add_argument(
+        "--manual-expire-sec",
+        type=int,
+        default=600,
+        help="Expiration window for the first manual run before second compare.",
+    )
+    p.add_argument(
         "--email-script",
         default="/usr/local/bin/motion_bed_state_email.sh",
         help="Script called on state transitions.",
@@ -317,12 +344,95 @@ def save_state(path: str, state: dict[str, Any]) -> None:
     p.write_text(json.dumps(state, indent=2))
 
 
+def load_manual_session(path: str) -> dict[str, Any] | None:
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if "saved_at" not in data or "candidate" not in data or "score" not in data:
+        return None
+    return data
+
+
+def save_manual_session(path: str, score: float, candidate: str) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "saved_at": int(time.time()),
+        "score": score,
+        "candidate": candidate,
+    }
+    p.write_text(json.dumps(payload, indent=2))
+
+
+def clear_manual_session(path: str) -> None:
+    try:
+        Path(path).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def classify(score: float, t_low: float, t_high: float) -> str:
     if score < t_low:
         return "made"
     if score > t_high:
         return "not_made"
     return "indeterminate"
+
+
+def score_current_frame(
+    *,
+    args: argparse.Namespace,
+    roi: RoiSpec | None,
+) -> tuple[float, str, np.ndarray, np.ndarray]:
+    """Capture/score one frame and return score, candidate, full image, and ROI image."""
+    if args.frame_file:
+        jpeg = read_jpeg_file(args.frame_file)
+        if jpeg is None:
+            if args.frame_url:
+                jpeg = fetch_first_jpeg(args.frame_url, args.timeout_sec)
+            else:
+                raise RuntimeError(f"Frame file not available: {args.frame_file}")
+    else:
+        jpeg = fetch_first_jpeg(args.frame_url, args.timeout_sec)
+
+    img = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise RuntimeError("Failed to decode fetched JPEG frame.")
+
+    frame_h, frame_w = img.shape[:2]
+    roi_scaled = scale_roi_to_frame(roi, frame_w, frame_h)
+    roi_img = apply_roi(img, roi_scaled, args.mask_polygon, args.pad)
+    if roi_img.size == 0:
+        raise RuntimeError("ROI crop resulted in empty image.")
+
+    # Run inference from RAM-backed temp file to avoid per-check SD writes.
+    roi_tmp = tempfile.NamedTemporaryFile(
+        prefix="bed-roi-",
+        suffix=".jpg",
+        dir="/dev/shm",
+        delete=False,
+    )
+    roi_tmp_path = Path(roi_tmp.name)
+    roi_tmp.close()
+    try:
+        ok = cv2.imwrite(str(roi_tmp_path), roi_img)
+        if not ok:
+            raise RuntimeError(f"Failed to write temp ROI image: {roi_tmp_path}")
+        score = score_image(args.model_ckpt, str(roi_tmp_path), args.image_size)
+    finally:
+        try:
+            roi_tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    candidate = classify(score, args.t_low, args.t_high)
+    return score, candidate, img, roi_img
 
 
 def maybe_transition(
@@ -390,6 +500,43 @@ def send_transition_email(
     )
 
 
+def send_state_email_with_annotation(
+    *,
+    args: argparse.Namespace,
+    img: np.ndarray,
+    roi: RoiSpec | None,
+    new_state: str,
+    prev_state: str,
+    score: float,
+) -> None:
+    roi_for_annotated = scale_roi_to_frame(roi, img.shape[1], img.shape[0])
+    annotated = draw_roi_outline(img, roi_for_annotated, args.pad)
+    ann_tmp = tempfile.NamedTemporaryFile(
+        prefix="bed-annotated-",
+        suffix=".jpg",
+        dir="/dev/shm",
+        delete=False,
+    )
+    ann_tmp_path = Path(ann_tmp.name)
+    ann_tmp.close()
+    ok = cv2.imwrite(str(ann_tmp_path), annotated)
+    if not ok:
+        raise RuntimeError(f"Failed to write temp annotated image: {ann_tmp_path}")
+    send_transition_email(
+        script=args.email_script,
+        new_state=new_state,
+        prev_state=prev_state,
+        score=score,
+        image_path=str(ann_tmp_path),
+        t_low=args.t_low,
+        t_high=args.t_high,
+    )
+    try:
+        ann_tmp_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def main() -> int:
     args = parse_args()
 
@@ -404,54 +551,184 @@ def main() -> int:
 
     roi = load_roi(args.roi_meta) if args.roi_meta else None
 
-    if args.frame_file:
-        jpeg = read_jpeg_file(args.frame_file)
-        if jpeg is None:
-            if args.frame_url:
-                jpeg = fetch_first_jpeg(args.frame_url, args.timeout_sec)
-            else:
-                print(
-                    json.dumps(
-                        {
-                            "skipped": True,
-                            "reason": "frame_file_missing",
-                            "frame_file": args.frame_file,
-                        }
-                    )
+    if args.frame_file and (not Path(args.frame_file).is_file()) and not args.frame_url:
+        print(
+            json.dumps(
+                {
+                    "skipped": True,
+                    "reason": "frame_file_missing",
+                    "frame_file": args.frame_file,
+                }
+            )
+        )
+        return 0
+
+    score, candidate, img, roi_img = score_current_frame(args=args, roi=roi)
+
+    # Optional second check gate: require agreement 10 minutes later before emailing.
+    # This filters transient events (for example, something briefly on the bed).
+    second_score: float | None = None
+    second_candidate: str | None = None
+    gate_passed = True
+    gate_reason = "not_required"
+    manual_step = ""
+    manual_pair_passed: bool | None = None
+    manual_pair_reason = ""
+    manual_session_file = args.manual_session_file if args.manual_two_step else ""
+    if args.manual_two_step:
+        manual_step = "1_saved"
+        max_age = max(1, int(args.manual_expire_sec))
+        session = load_manual_session(args.manual_session_file)
+        if session is None:
+            save_manual_session(args.manual_session_file, score, candidate)
+            print(
+                json.dumps(
+                    {
+                        "score": score,
+                        "candidate": candidate,
+                        "second_score": None,
+                        "second_candidate": None,
+                        "email_gate_passed": False,
+                        "email_gate_reason": "manual_step1_saved",
+                        "manual_two_step": True,
+                        "manual_step": manual_step,
+                        "manual_pair_passed": None,
+                        "manual_pair_reason": "saved_first_check",
+                        "manual_session_file": args.manual_session_file,
+                        "state": load_state(args.state_file).get("state", "unknown"),
+                        "changed": False,
+                        "emailed": False,
+                        "prev_state": load_state(args.state_file).get("state", "unknown"),
+                        "t_low": args.t_low,
+                        "t_high": args.t_high,
+                        "frame": str(frame_annotated) if args.save_debug_frames else "",
+                    }
                 )
-                return 0
-    else:
-        jpeg = fetch_first_jpeg(args.frame_url, args.timeout_sec)
+            )
+            return 0
 
-    img = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if img is None:
-        raise RuntimeError("Failed to decode fetched JPEG frame.")
-    frame_h, frame_w = img.shape[:2]
-    roi = scale_roi_to_frame(roi, frame_w, frame_h)
+        saved_at = int(session.get("saved_at", 0))
+        age_sec = max(0, int(time.time()) - saved_at)
+        if age_sec > max_age:
+            clear_manual_session(args.manual_session_file)
+            save_manual_session(args.manual_session_file, score, candidate)
+            print(
+                json.dumps(
+                    {
+                        "score": score,
+                        "candidate": candidate,
+                        "second_score": None,
+                        "second_candidate": None,
+                        "email_gate_passed": False,
+                        "email_gate_reason": "manual_step1_saved",
+                        "manual_two_step": True,
+                        "manual_step": manual_step,
+                        "manual_pair_passed": None,
+                        "manual_pair_reason": "expired_previous_first_check",
+                        "manual_session_file": args.manual_session_file,
+                        "state": load_state(args.state_file).get("state", "unknown"),
+                        "changed": False,
+                        "emailed": False,
+                        "prev_state": load_state(args.state_file).get("state", "unknown"),
+                        "t_low": args.t_low,
+                        "t_high": args.t_high,
+                        "frame": str(frame_annotated) if args.save_debug_frames else "",
+                    }
+                )
+            )
+            return 0
 
-    roi_img = apply_roi(img, roi, args.mask_polygon, args.pad)
-    if roi_img.size == 0:
-        raise RuntimeError("ROI crop resulted in empty image.")
-    # Run inference from RAM-backed temp file to avoid per-check SD writes.
-    roi_tmp = tempfile.NamedTemporaryFile(
-        prefix="bed-roi-",
-        suffix=".jpg",
-        dir="/dev/shm",
-        delete=False,
-    )
-    roi_tmp_path = Path(roi_tmp.name)
-    roi_tmp.close()
-    try:
-        ok = cv2.imwrite(str(roi_tmp_path), roi_img)
-        if not ok:
-            raise RuntimeError(f"Failed to write temp ROI image: {roi_tmp_path}")
-        score = score_image(args.model_ckpt, str(roi_tmp_path), args.image_size)
-    finally:
-        try:
-            roi_tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-    candidate = classify(score, args.t_low, args.t_high)
+        manual_step = "2_compared"
+        second_score = float(session.get("score", 0.0))
+        second_candidate = str(session.get("candidate", "indeterminate"))
+        clear_manual_session(args.manual_session_file)
+
+        manual_pair_passed = (
+            candidate in {"made", "not_made"}
+            and second_candidate in {"made", "not_made"}
+            and candidate == second_candidate
+        )
+        gate_passed = bool(manual_pair_passed)
+        if gate_passed:
+            manual_pair_reason = "passed"
+            gate_reason = "manual_passed"
+        elif second_candidate not in {"made", "not_made"}:
+            manual_pair_reason = "first_check_indeterminate"
+            gate_reason = "manual_first_check_indeterminate"
+        elif candidate not in {"made", "not_made"}:
+            manual_pair_reason = "second_check_indeterminate"
+            gate_reason = "manual_second_check_indeterminate"
+        elif second_candidate != candidate:
+            manual_pair_reason = "check_mismatch"
+            gate_reason = "manual_check_mismatch"
+        else:
+            manual_pair_reason = "blocked_unknown"
+            gate_reason = "manual_blocked_unknown"
+    elif args.require_second_check_for_email:
+        delay = max(0, int(args.double_check_delay_sec))
+        if delay > 0:
+            time.sleep(delay)
+        second_score, second_candidate, _, _ = score_current_frame(args=args, roi=roi)
+        gate_passed = (
+            candidate in {"made", "not_made"}
+            and second_candidate in {"made", "not_made"}
+            and candidate == second_candidate
+        )
+        if gate_passed:
+            gate_reason = "passed"
+        elif candidate not in {"made", "not_made"}:
+            gate_reason = "first_check_indeterminate"
+        elif second_candidate not in {"made", "not_made"}:
+            gate_reason = "second_check_indeterminate"
+        elif candidate != second_candidate:
+            gate_reason = "check_mismatch"
+        else:
+            gate_reason = "blocked_unknown"
+
+    indeterminate_reasons = {
+        "first_check_indeterminate",
+        "second_check_indeterminate",
+        "manual_first_check_indeterminate",
+        "manual_second_check_indeterminate",
+    }
+
+    if args.manual_two_step and not gate_passed:
+        state = load_state(args.state_file)
+        prev_state = state.get("state", "unknown")
+        if gate_reason in indeterminate_reasons:
+            send_state_email_with_annotation(
+                args=args,
+                img=img,
+                roi=roi,
+                new_state="indeterminate",
+                prev_state=prev_state,
+                score=score,
+            )
+        print(
+            json.dumps(
+                {
+                    "score": score,
+                    "candidate": candidate,
+                    "second_score": second_score,
+                    "second_candidate": second_candidate,
+                    "email_gate_passed": False,
+                    "email_gate_reason": gate_reason,
+                    "manual_two_step": True,
+                    "manual_step": manual_step,
+                    "manual_pair_passed": manual_pair_passed,
+                    "manual_pair_reason": manual_pair_reason,
+                    "manual_session_file": manual_session_file,
+                    "state": state.get("state", "unknown"),
+                    "changed": False,
+                    "emailed": False,
+                    "prev_state": prev_state,
+                    "t_low": args.t_low,
+                    "t_high": args.t_high,
+                    "frame": str(frame_annotated) if args.save_debug_frames else "",
+                }
+            )
+        )
+        return 0
 
     state = load_state(args.state_file)
     prev_state = state.get("state", "unknown")
@@ -461,39 +738,56 @@ def main() -> int:
     state["updated_at"] = int(time.time())
     save_state(args.state_file, state)
 
-    if changed:
-        annotated = draw_roi_outline(img, roi, args.pad)
-        ann_tmp = tempfile.NamedTemporaryFile(
-            prefix="bed-annotated-",
-            suffix=".jpg",
-            dir="/dev/shm",
-            delete=False,
+    # Send transition email as before, and also send same-state status emails
+    # when the current check confidently classifies made/not_made.
+    stable_state = state.get("state")
+    send_same_state_status = (not changed) and (candidate in {"made", "not_made"}) and (candidate == stable_state)
+    email_intended = bool(changed or send_same_state_status)
+    send_indeterminate_status = (not gate_passed) and (gate_reason in indeterminate_reasons)
+
+    if email_intended and not gate_passed:
+        print(
+            json.dumps(
+                {
+                    "email_blocked": True,
+                    "reason": gate_reason,
+                    "first_candidate": candidate,
+                    "second_candidate": second_candidate,
+                    "first_score": score,
+                    "second_score": second_score,
+                }
+            )
         )
-        ann_tmp_path = Path(ann_tmp.name)
-        ann_tmp.close()
-        ok = cv2.imwrite(str(ann_tmp_path), annotated)
-        if not ok:
-            raise RuntimeError(f"Failed to write temp annotated image: {ann_tmp_path}")
-        send_transition_email(
-            script=args.email_script,
+
+    if email_intended and gate_passed:
+        send_state_email_with_annotation(
+            args=args,
+            img=img,
+            roi=roi,
             new_state=effective_state,
             prev_state=prev_state,
             score=score,
-            image_path=str(ann_tmp_path),
-            t_low=args.t_low,
-            t_high=args.t_high,
         )
-        try:
-            ann_tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+    elif send_indeterminate_status:
+        send_state_email_with_annotation(
+            args=args,
+            img=img,
+            roi=roi,
+            new_state="indeterminate",
+            prev_state=prev_state,
+            score=score,
+        )
 
     if args.save_debug_frames:
-        frame_full.write_bytes(jpeg)
+        ok, full_buf = cv2.imencode(".jpg", img)
+        if not ok:
+            raise RuntimeError("Failed to encode full frame for debug output.")
+        frame_full.write_bytes(bytes(full_buf))
         ok = cv2.imwrite(str(frame_roi), roi_img)
         if not ok:
             raise RuntimeError(f"Failed to write ROI image: {frame_roi}")
-        annotated = draw_roi_outline(img, roi, args.pad)
+        roi_for_annotated = scale_roi_to_frame(roi, img.shape[1], img.shape[0])
+        annotated = draw_roi_outline(img, roi_for_annotated, args.pad)
         ok = cv2.imwrite(str(frame_annotated), annotated)
         if not ok:
             raise RuntimeError(f"Failed to write annotated image: {frame_annotated}")
@@ -503,8 +797,18 @@ def main() -> int:
             {
                 "score": score,
                 "candidate": candidate,
+                "second_score": second_score,
+                "second_candidate": second_candidate,
+                "email_gate_passed": gate_passed,
+                "email_gate_reason": gate_reason,
+                "manual_two_step": args.manual_two_step,
+                "manual_step": manual_step,
+                "manual_pair_passed": manual_pair_passed,
+                "manual_pair_reason": manual_pair_reason,
+                "manual_session_file": manual_session_file,
                 "state": state.get("state", "unknown"),
                 "changed": changed,
+                "emailed": bool((email_intended and gate_passed) or send_indeterminate_status),
                 "prev_state": prev_state,
                 "t_low": args.t_low,
                 "t_high": args.t_high,

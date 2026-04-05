@@ -12,6 +12,14 @@ LOCKFILE="/var/lib/motion/.on_event_end_pipeline.lock"
 exec 9>"$LOCKFILE"
 flock 9
 
+############################################################
+# Audio – do NOT kill arecord here. on_movie_end owns the full
+# arecord lifecycle (stop → mux → restart). Killing here raced
+# with on_movie_end and caused the WAV file to be missing or
+# in a transient state when the mux ran. on_event_start handles
+# stale arecord cleanup for the next event.
+############################################################
+
 WORKDIR="$(mktemp -d -p /var/lib/motion eventproc.XXXXXX)"
 cleanup() {
   rm -rf "$WORKDIR"
