@@ -1,0 +1,12 @@
+[Unit]
+Description=Grant motion user access to PipeWire runtime socket
+After=user@1000.service
+Requires=user@1000.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/setfacl -m u:motion:rx /run/user/1000 /run/user/1000/pulse
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

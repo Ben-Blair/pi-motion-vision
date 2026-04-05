@@ -1,0 +1,19 @@
+[Unit]
+Description=Fart Detection API Server
+After=network.target motion.service
+
+[Service]
+Type=simple
+User=motion
+Group=motion
+ExecStart=/usr/bin/python3 /usr/local/bin/fart_api.py
+Environment=FART_DB_PATH=/var/lib/motion/fart_events.db
+Environment=FART_THUMBNAIL_DIR=/var/lib/motion/fart_thumbnails
+Environment=FART_VIDEO_DIR=/var/lib/motion/videos
+Environment=FART_API_HOST=0.0.0.0
+Environment=FART_API_PORT=5000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

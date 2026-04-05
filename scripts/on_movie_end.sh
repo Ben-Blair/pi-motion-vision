@@ -35,6 +35,35 @@ record_wav_path() {
   fi
 }
 
+is_fart_detector_running() {
+  if [ -f "$PID_FILE" ]; then
+    local pid
+    pid=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      # Check if it's fart_detector.py (not plain arecord)
+      if grep -q "fart_detector" /proc/"$pid"/cmdline 2>/dev/null; then
+        return 0
+      fi
+    fi
+  fi
+  return 1
+}
+
+signal_fart_detector_restart_wav() {
+  # Send SIGUSR1 to fart_detector.py so it finalizes the current WAV
+  # and starts a new segment, without stopping classification.
+  if [ -f "$PID_FILE" ]; then
+    local pid
+    pid=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill -USR1 "$pid" 2>/dev/null
+      sleep 0.5
+      return 0
+    fi
+  fi
+  return 1
+}
+
 stop_audio() {
   if [ -f "$PID_FILE" ]; then
     local pid
@@ -48,6 +77,7 @@ stop_audio() {
     fi
     rm -f "$PID_FILE"
   fi
+  pkill -f "fart_detector.py" -u motion 2>/dev/null || true
   pkill -x -u motion arecord 2>/dev/null || true
   for _ in $(seq 1 30); do
     pgrep -x -u motion arecord >/dev/null 2>&1 || break
@@ -106,30 +136,44 @@ if [ -z "$MOVIE_FILE" ] || [ ! -f "$MOVIE_FILE" ]; then
   exit 0
 fi
 
-stop_audio
-
-AUDIO_FILE="$(audio_wav_path)"
-
-# Give arecord a moment to finalize the WAV header after SIGTERM.
-# On tmpfs the I/O is instant, but the process needs a brief window
-# to seek back and update the RIFF size fields before exiting.
-for _ in $(seq 1 50); do
-  [ -f "$AUDIO_FILE" ] && [ -s "$AUDIO_FILE" ] && break
+# If fart_detector.py is running, use SIGUSR1 to rotate the WAV file.
+# The detector finalizes the WAV header, renames the file to *.wav.mux,
+# and opens a fresh WAV at the original path for the next segment.
+# Otherwise fall back to the legacy stop/mux/start flow.
+if is_fart_detector_running; then
+  BASE_AUDIO="$(audio_wav_path)"
+  signal_fart_detector_restart_wav
+  # Wait for the .mux file to appear (detector renames after finalizing)
+  AUDIO_FILE="${BASE_AUDIO}.mux"
+  for _ in $(seq 1 20); do
+    [ -f "$AUDIO_FILE" ] && [ -s "$AUDIO_FILE" ] && break
+    sleep 0.1
+  done
+else
+  stop_audio
   AUDIO_FILE="$(audio_wav_path)"
-  sleep 0.1
-done
+  for _ in $(seq 1 50); do
+    [ -f "$AUDIO_FILE" ] && [ -s "$AUDIO_FILE" ] && break
+    AUDIO_FILE="$(audio_wav_path)"
+    sleep 0.1
+  done
+fi
 
 if [ ! -f "$AUDIO_FILE" ] || [ ! -s "$AUDIO_FILE" ]; then
-  logger -t "$TAG" "No audio file to mux into $MOVIE_FILE (expected $(audio_wav_path))"
+  logger -t "$TAG" "No audio file to mux into $MOVIE_FILE (expected $AUDIO_FILE)"
   rm -f "$AUDIO_FILE"
-  start_audio || true
+  if ! is_fart_detector_running; then
+    start_audio || true
+  fi
   exit 0
 fi
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
   logger -t "$TAG" "ffmpeg not installed, skipping audio mux"
   rm -f "$AUDIO_FILE"
-  start_audio || true
+  if ! is_fart_detector_running; then
+    start_audio || true
+  fi
   exit 0
 fi
 
@@ -149,6 +193,8 @@ fi
 
 rm -f "$AUDIO_FILE"
 
-start_audio || true
+if ! is_fart_detector_running; then
+  start_audio || true
+fi
 
 exit 0
