@@ -16,6 +16,7 @@ import csv
 import json
 import logging
 import os
+import re
 import signal
 import sqlite3
 import shutil
@@ -228,6 +229,34 @@ def load_class_names(csv_path: str) -> list[str]:
 # Audio helpers
 # ---------------------------------------------------------------------------
 
+def detect_alsa_plughw_mic() -> str | None:
+    """Pick capture device like on_movie_end.sh: 'microphone' in card name, else first card."""
+    try:
+        r = subprocess.run(
+            ["arecord", "-l"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip().startswith("card ")]
+    pick = None
+    for ln in lines:
+        if "microphone" in ln.lower():
+            pick = ln
+            break
+    if pick is None and lines:
+        pick = lines[0]
+    if not pick:
+        return None
+    m = re.search(r"card (\d+):.*device (\d+):", pick)
+    if not m:
+        return None
+    return f"plughw:{m.group(1)},{m.group(2)}"
+
+
 def find_input_device() -> int | None:
     """Find the best PortAudio input device index; prefer one named 'microphone'."""
     try:
@@ -245,11 +274,15 @@ def find_input_device() -> int | None:
     return fallback
 
 
-def resample_chunk(audio_44k: np.ndarray) -> np.ndarray:
-    """Resample from 44100 to 16000 Hz using linear interpolation (fast, good enough)."""
-    length_out = int(len(audio_44k) * YAMNET_SAMPLE_RATE / RECORD_SAMPLE_RATE)
-    indices = np.linspace(0, len(audio_44k) - 1, length_out)
-    return np.interp(indices, np.arange(len(audio_44k)), audio_44k).astype(np.float32)
+def resample_to_yamnet(audio_f32: np.ndarray, src_sr: int) -> np.ndarray:
+    """Resample mono float32 audio from src_sr to YAMNet rate (linear interpolation)."""
+    if src_sr == YAMNET_SAMPLE_RATE:
+        return audio_f32.astype(np.float32)
+    length_out = int(len(audio_f32) * YAMNET_SAMPLE_RATE / src_sr)
+    if length_out < 1:
+        return np.zeros(0, dtype=np.float32)
+    indices = np.linspace(0, len(audio_f32) - 1, length_out)
+    return np.interp(indices, np.arange(len(audio_f32)), audio_f32).astype(np.float32)
 
 # ---------------------------------------------------------------------------
 # WAV writer (manual, so we can finalize on signal)
@@ -330,6 +363,7 @@ class FartDetector:
         signal.signal(signal.SIGTERM, self._handle_stop)
         signal.signal(signal.SIGINT, self._handle_stop)
         signal.signal(signal.SIGUSR1, self._handle_restart_wav)
+        self._record_sr = RECORD_SAMPLE_RATE
 
     def _handle_stop(self, signum, frame):
         log.info("Received signal %d, shutting down", signum)
@@ -394,32 +428,82 @@ class FartDetector:
 
     def run(self):
         chunk_seconds = 1.0
-        chunk_samples = int(RECORD_SAMPLE_RATE * chunk_seconds)
+        alsa_dev = detect_alsa_plughw_mic()
+        arecord_proc: subprocess.Popen | None = None
+        stream = None
+
+        if alsa_dev:
+            self._record_sr = RECORD_SAMPLE_RATE
+            chunk_samples = int(self._record_sr * chunk_seconds)
+            self.wav_writer = WavWriter(self.wav_path, self._record_sr)
+            log.info("Recording to %s (rate=%d)", self.wav_path, self._record_sr)
+            log.info("Using ALSA capture via arecord: %s", alsa_dev)
+            try:
+                arecord_proc = subprocess.Popen(
+                    [
+                        "arecord",
+                        "-D",
+                        alsa_dev,
+                        "-f",
+                        "S16_LE",
+                        "-r",
+                        str(self._record_sr),
+                        "-c",
+                        "1",
+                        "-t",
+                        "raw",
+                        "-q",
+                        "-",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,
+                )
+                time.sleep(0.1)
+                if arecord_proc.poll() is not None:
+                    err = ""
+                    if arecord_proc.stderr:
+                        err = arecord_proc.stderr.read().decode(errors="replace")[:800]
+                    log.error("arecord failed to start: %s", err or "(no stderr)")
+                    if self.wav_writer:
+                        self.wav_writer.close()
+                    return
+            except Exception as e:
+                log.error("Failed to spawn arecord: %s", e)
+                if self.wav_writer:
+                    self.wav_writer.close()
+                return
+        else:
+            log.warning("arecord -l found no mic; falling back to sounddevice")
+            try:
+                dev_idx = find_input_device()
+                if dev_idx is None:
+                    log.error("No input device for sounddevice")
+                    return
+                dev_info = sd.query_devices(dev_idx)
+                self._record_sr = int(float(dev_info.get("default_samplerate") or RECORD_SAMPLE_RATE))
+                chunk_samples = int(self._record_sr * chunk_seconds)
+                self.wav_writer = WavWriter(self.wav_path, self._record_sr)
+                log.info("Recording to %s (rate=%d)", self.wav_path, self._record_sr)
+                log.info("Using input device %d: %s", dev_idx, dev_info["name"])
+                stream = sd.InputStream(
+                    samplerate=self._record_sr,
+                    channels=1,
+                    dtype="int16",
+                    blocksize=chunk_samples,
+                    device=dev_idx,
+                )
+                stream.start()
+            except Exception as e:
+                log.error("Failed to open audio stream: %s", e)
+                if self.wav_writer:
+                    self.wav_writer.close()
+                return
+
         classify_buffer = np.zeros(0, dtype=np.float32)
         window_samples = int(YAMNET_SAMPLE_RATE * CLASSIFY_WINDOW_SEC)
         hop_samples = int(YAMNET_SAMPLE_RATE * CLASSIFY_HOP_SEC)
-
-        self.wav_writer = WavWriter(self.wav_path, RECORD_SAMPLE_RATE)
-        log.info("Recording to %s (rate=%d)", self.wav_path, RECORD_SAMPLE_RATE)
-
-        try:
-            dev_idx = find_input_device()
-            if dev_idx is not None:
-                dev_info = sd.query_devices(dev_idx)
-                log.info("Using input device %d: %s", dev_idx, dev_info["name"])
-            stream = sd.InputStream(
-                samplerate=RECORD_SAMPLE_RATE,
-                channels=1,
-                dtype="int16",
-                blocksize=chunk_samples,
-                device=dev_idx,
-            )
-            stream.start()
-        except Exception as e:
-            log.error("Failed to open audio stream: %s", e)
-            if self.wav_writer:
-                self.wav_writer.close()
-            return
+        frame_bytes = chunk_samples * 2
 
         log.info("Fart detector running (threshold=%.2f, event=%s)", self.threshold, self.event_id)
 
@@ -429,24 +513,44 @@ class FartDetector:
                     self._do_restart_wav()
                     self._restart_wav = False
 
-                try:
-                    data, overflowed = stream.read(chunk_samples)
-                except Exception as e:
-                    log.warning("Audio read error: %s", e)
-                    time.sleep(0.1)
-                    continue
+                if arecord_proc is not None:
+                    assert arecord_proc.stdout is not None
+                    raw = b""
+                    while len(raw) < frame_bytes and self.running:
+                        piece = arecord_proc.stdout.read(frame_bytes - len(raw))
+                        if not piece:
+                            break
+                        raw += piece
+                    if len(raw) < frame_bytes:
+                        if arecord_proc.poll() is not None:
+                            err = ""
+                            if arecord_proc.stderr:
+                                err = arecord_proc.stderr.read().decode(errors="replace")[:800]
+                            log.error("arecord ended (rc=%s): %s", arecord_proc.returncode, err)
+                            break
+                        time.sleep(0.02)
+                        continue
+                    pcm = np.frombuffer(raw, dtype=np.int16).copy()
+                else:
+                    assert stream is not None
+                    try:
+                        data, overflowed = stream.read(chunk_samples)
+                    except Exception as e:
+                        log.warning("Audio read error: %s", e)
+                        time.sleep(0.1)
+                        continue
 
-                if overflowed:
-                    log.debug("Audio buffer overflow (non-fatal)")
+                    if overflowed:
+                        log.debug("Audio buffer overflow (non-fatal)")
 
-                pcm = data[:, 0]
+                    pcm = data[:, 0]
 
                 with self._lock:
                     if self.wav_writer:
                         self.wav_writer.write(pcm)
 
                 audio_f32 = pcm.astype(np.float32) / 32768.0
-                audio_16k = resample_chunk(audio_f32)
+                audio_16k = resample_to_yamnet(audio_f32, self._record_sr)
                 classify_buffer = np.concatenate([classify_buffer, audio_16k])
 
                 now = time.time()
@@ -476,8 +580,15 @@ class FartDetector:
                         self._trigger_bt_announce()
 
         finally:
-            stream.stop()
-            stream.close()
+            if stream is not None:
+                stream.stop()
+                stream.close()
+            if arecord_proc is not None:
+                arecord_proc.terminate()
+                try:
+                    arecord_proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    arecord_proc.kill()
             with self._lock:
                 if self.wav_writer:
                     self.wav_writer.close()
@@ -501,7 +612,7 @@ class FartDetector:
                 log.info("Renamed for mux: %s -> %s", old_path, mux_path)
             except OSError as e:
                 log.warning("Failed to rename WAV for mux: %s", e)
-            self.wav_writer = WavWriter(old_path, RECORD_SAMPLE_RATE)
+            self.wav_writer = WavWriter(old_path, self._record_sr)
             log.info("New WAV segment: %s", old_path)
 
 
