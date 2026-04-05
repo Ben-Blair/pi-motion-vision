@@ -14,6 +14,9 @@ sample.jpg
 # Local symlink to live recordings (see pi-motion-vision.code-workspace)
 motion-videos
 
+# Secrets (copy from etc/fart-detector.env.example → /etc/fart-detector.env on the Pi)
+etc/fart-detector.env
+
 # Generated runtime artifacts
 results/
 **/__pycache__/

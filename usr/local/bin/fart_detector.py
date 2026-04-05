@@ -70,7 +70,7 @@ _weather_cache: dict = {"temp_f": None, "fetched_at": 0.0}
 
 
 def _load_weather_env() -> dict[str, str]:
-    """Read key=value pairs from /etc/fart-detector.env (no shell expansion)."""
+    """Read key=value pairs from /etc/fart-detector.env (template: etc/fart-detector.env.example)."""
     env: dict[str, str] = {}
     if not WEATHER_ENV_FILE.exists():
         return env
