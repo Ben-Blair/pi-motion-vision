@@ -197,4 +197,23 @@ if ! is_fart_detector_running; then
   start_audio || true
 fi
 
+# Optional: upload this clip to Supabase (non-blocking). Set in the motion service env:
+#   SUPABASE_UPLOAD=1
+#   PI_MOTION_VISION_REPO=/path/to/pi-motion-vision   (repo root; must contain etc/supabase.env + .venv)
+if [ "${SUPABASE_UPLOAD:-0}" = "1" ] && [ -n "${PI_MOTION_VISION_REPO:-}" ]; then
+  REPO="$PI_MOTION_VISION_REPO"
+  PY="${SUPABASE_UPLOAD_PYTHON:-$REPO/.venv/bin/python}"
+  UPLOADER="$REPO/scripts/upload_new_motion_videos.py"
+  ENV_FILE="$REPO/etc/supabase.env"
+  if [ -x "$PY" ] && [ -f "$UPLOADER" ] && [ -f "$ENV_FILE" ] && [ -f "$MOVIE_FILE" ]; then
+    (
+      set -a
+      # shellcheck disable=SC1090
+      . "$ENV_FILE"
+      set +a
+      exec "$PY" "$UPLOADER" "$MOVIE_FILE"
+    ) >>/var/lib/motion/supabase-upload.log 2>&1 &
+  fi
+fi
+
 exit 0

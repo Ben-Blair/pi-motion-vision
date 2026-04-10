@@ -16,6 +16,11 @@ motion-videos
 
 # Secrets (copy from etc/fart-detector.env.example → /etc/fart-detector.env on the Pi)
 etc/fart-detector.env
+etc/supabase.env
+etc/supabase.env.example
+
+# Standalone school / demo repo (separate git root)
+school-supabase-upload/
 
 # Generated runtime artifacts
 results/
