@@ -6,6 +6,9 @@
 #
 # Override file:  export UPLOAD_VIDEO=/path/to/clip.mp4
 #
+# Transient upload failures (e.g. TLS on Wi‑Fi): SUPABASE_UPLOAD_MAX_ATTEMPTS (default 5),
+# SUPABASE_UPLOAD_RETRY_DELAY_SEC (default 5; backoff doubles each retry).
+#
 # Other scripts import upload_mp4_path() from this module.
 #
 # Whole-script picture (bottom → top in code): main() chooses a file;
@@ -15,12 +18,21 @@
 
 # --- Standard library: env vars, temp files, filesystem paths ---
 import os
+import sys
 import tempfile
+import time
 from pathlib import Path
 
 # --- Third party: ffmpeg wrapper (needs `ffmpeg` binary on PATH); Supabase Python client ---
 import ffmpeg
+import httpx
 from supabase import create_client, Client
+
+
+def _upload_stderr(msg: str) -> None:
+    """Log to stderr so Motion’s redirect captures lines in supabase-upload.log."""
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{ts} [supabase-upload] {msg}", file=sys.stderr, flush=True)
 
 
 # =============================================================================
@@ -127,10 +139,11 @@ def upload_mp4_path(source: Path) -> None:
     max_raw_bytes = int(target_mb * 1024 * 1024)
     target_size_k = int(target_mb * 1000)
 
-    supabase = _supabase()
     # Object key in Storage = basename (e.g. same name as on disk).
     key = source.name
     tmp: str | None = None
+    max_attempts = max(1, int(os.environ.get("SUPABASE_UPLOAD_MAX_ATTEMPTS", "5").strip() or "5"))
+    base_delay = max(0.5, float(os.environ.get("SUPABASE_UPLOAD_RETRY_DELAY_SEC", "5").strip() or "5"))
     try:
         if source.stat().st_size > max_raw_bytes:
             # Too big for Supabase Free: encode to a disposable temp file, then upload that.
@@ -143,12 +156,26 @@ def upload_mp4_path(source: Path) -> None:
             upload_path = source
 
         # Storage API accepts a file-like object; upsert replaces if key already exists.
-        with open(upload_path, "rb") as f:
-            supabase.storage.from_(bucket).upload(
-                key,
-                f,
-                file_options={"content-type": "video/mp4", "upsert": "true"},
-            )
+        # Retries: flaky Wi‑Fi and HTTP/2 long uploads often raise httpx.RequestError (e.g. ReadError / TLS).
+        for attempt in range(1, max_attempts + 1):
+            try:
+                supabase = _supabase()
+                with open(upload_path, "rb") as f:
+                    supabase.storage.from_(bucket).upload(
+                        key,
+                        f,
+                        file_options={"content-type": "video/mp4", "upsert": "true"},
+                    )
+                _upload_stderr(f"uploaded {key!r} (attempt {attempt}/{max_attempts})")
+                break
+            except httpx.RequestError as e:
+                if attempt >= max_attempts:
+                    raise
+                delay = base_delay * (2 ** (attempt - 1))
+                _upload_stderr(
+                    f"attempt {attempt}/{max_attempts} failed for {key!r}: {e!r}; sleeping {delay:.1f}s"
+                )
+                time.sleep(delay)
     finally:
         # Always remove temp encode output so we don’t fill the disk.
         if tmp and os.path.isfile(tmp):

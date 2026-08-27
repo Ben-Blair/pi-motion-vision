@@ -1,20 +1,21 @@
 #!/bin/bash
 # Connects to the Logitech BT Adapter (if not already connected),
-# plays a TTS announcement via PipeWire, then disconnects.
+# plays a weather-matched voice recording via PipeWire, then disconnects.
 # Called as a fire-and-forget subprocess by fart_detector.py.
 #
-# Usage: bt_announce.sh ["message text"]
-#   If a message is provided and pico2wave is installed, TTS audio is
-#   generated on the fly. Otherwise falls back to a static WAV file.
+# Usage: bt_announce.sh [weather_descriptor]
+#   weather_descriptor: lowercase word like "warm", "cold", "mild", etc.
+#   The script picks a recording whose filename contains that word.
+#   If no match or no descriptor given, falls back to a file containing "fart detected".
+#   Falls back to the static WAV if the voice-recordings folder is empty.
 
 set -uo pipefail
 
 TAG="fart_bt"
 BT_MAC="10:94:97:30:44:66"
-STATIC_WAV="/home/bblair23/pi-motion-vision/assets/fart_detected.wav"
-GENERATED_WAV="/tmp/fart_tts_$$.wav"
-TTS_MESSAGE="${1:-}"
-USED_GENERATED=false
+VOICE_DIR="/home/bblair23/pi-motion-vision/assets/voice-recordings"
+FALLBACK_WAV="/home/bblair23/pi-motion-vision/assets/fart_detected.wav"
+DESCRIPTOR="${1:-}"
 
 # PipeWire runs under UID 1000 (bblair23). Point pw-play at that session.
 export XDG_RUNTIME_DIR=/run/user/1000
@@ -26,24 +27,62 @@ export PULSE_SERVER=unix:/run/user/1000/pulse/native
 BT_SINK_VOLUME="${BT_SINK_VOLUME:-1.0}"
 BT_DEVICE_VOLUME="${BT_DEVICE_VOLUME:-1.0}"
 
-# --- TTS generation ---
+# --- Pick a matching voice recording ---
+# Strategy:
+#   1. If a descriptor is given, find files whose name contains it (case-insensitive).
+#   2. Otherwise find files whose name contains "fart detected" (the generic recording).
+#   3. If still nothing, pick any file in the directory.
+#   4. Fall back to the static WAV.
 
-if [ -n "$TTS_MESSAGE" ] && command -v pico2wave >/dev/null 2>&1; then
-  if pico2wave -l en-US -w "$GENERATED_WAV" "$TTS_MESSAGE" 2>/dev/null; then
-    TTS_WAV="$GENERATED_WAV"
-    USED_GENERATED=true
-    logger -t "$TAG" "Generated TTS: $TTS_MESSAGE"
-  else
-    logger -t "$TAG" "pico2wave failed, falling back to static WAV"
-    TTS_WAV="$STATIC_WAV"
+find_recordings() {
+  local pattern="${1:-}"
+  local files=()
+  while IFS= read -r -d '' f; do
+    local base
+    base="$(basename "$f" | tr '[:upper:]' '[:lower:]')"
+    if [ -z "$pattern" ] || [[ "$base" == *"$pattern"* ]]; then
+      files+=("$f")
+    fi
+  done < <(find "$VOICE_DIR" -maxdepth 1 -type f \( -iname "*.wav" -o -iname "*.mp3" -o -iname "*.ogg" -o -iname "*.m4a" \) -print0 2>/dev/null)
+  printf '%s\0' "${files[@]+"${files[@]}"}"
+}
+
+pick_from_list() {
+  local files=()
+  while IFS= read -r -d '' f; do
+    files+=("$f")
+  done
+  if [ "${#files[@]}" -eq 0 ]; then
+    echo ""
+    return
   fi
-else
-  TTS_WAV="$STATIC_WAV"
+  local idx=$(( RANDOM % ${#files[@]} ))
+  echo "${files[$idx]}"
+}
+
+PLAY_FILE=""
+
+if [ -n "$DESCRIPTOR" ]; then
+  PLAY_FILE="$(find_recordings "$DESCRIPTOR" | pick_from_list)"
 fi
 
-if [ ! -f "$TTS_WAV" ]; then
-  logger -t "$TAG" "TTS WAV file missing: $TTS_WAV"
-  rm -f "$GENERATED_WAV"
+if [ -z "$PLAY_FILE" ]; then
+  PLAY_FILE="$(find_recordings "fartdetected" | pick_from_list)"
+fi
+
+if [ -z "$PLAY_FILE" ]; then
+  PLAY_FILE="$(find_recordings "" | pick_from_list)"
+fi
+
+if [ -z "$PLAY_FILE" ]; then
+  logger -t "$TAG" "No recordings in $VOICE_DIR, using fallback WAV"
+  PLAY_FILE="$FALLBACK_WAV"
+else
+  logger -t "$TAG" "Playing recording: $(basename "$PLAY_FILE") (descriptor=${DESCRIPTOR:-none})"
+fi
+
+if [ ! -f "$PLAY_FILE" ]; then
+  logger -t "$TAG" "Audio file missing: $PLAY_FILE"
   exit 1
 fi
 
@@ -114,21 +153,17 @@ BT_SINK=$(pw-cli ls Node 2>/dev/null | grep -B1 "bluez_output" | grep "node.name
 
 if [ -n "$BT_SINK" ]; then
   maximize_bt_sink_volume
-  logger -t "$TAG" "Playing TTS on PipeWire sink: $BT_SINK (stream vol=$BT_SINK_VOLUME)"
-  pw-play --volume "$BT_SINK_VOLUME" --target "$BT_SINK" "$TTS_WAV" 2>/dev/null || \
-    aplay "$TTS_WAV" 2>/dev/null || \
-    logger -t "$TAG" "Failed to play TTS audio"
+  logger -t "$TAG" "Playing on PipeWire sink: $BT_SINK (stream vol=$BT_SINK_VOLUME)"
+  pw-play --volume "$BT_SINK_VOLUME" --target "$BT_SINK" "$PLAY_FILE" 2>/dev/null || \
+    aplay "$PLAY_FILE" 2>/dev/null || \
+    logger -t "$TAG" "Failed to play audio"
 else
   logger -t "$TAG" "No BT sink found, trying aplay"
-  aplay "$TTS_WAV" 2>/dev/null || \
-    logger -t "$TAG" "Failed to play TTS audio"
+  aplay "$PLAY_FILE" 2>/dev/null || \
+    logger -t "$TAG" "Failed to play audio"
 fi
 
 sleep 1
-
-if [ "$USED_GENERATED" = true ]; then
-  rm -f "$GENERATED_WAV"
-fi
 
 if [ "$WE_CONNECTED" = true ]; then
   logger -t "$TAG" "Disconnecting from $BT_MAC"

@@ -4,20 +4,15 @@ set -e
 EVENT_DIR="/var/lib/motion"
 EVENT_ID_FILE="$EVENT_DIR/current_event_id"
 PID_FILE="/dev/shm/motion_audio.pid"
+TAG="motion_event"
 
-# NOTE:
-# We no longer clear /var/lib/motion/snapshots or /var/lib/motion/best_snapshot.jpg
-# here. Cleanup happens at event end so overlapping events can't wipe files needed
-# for the previous event's processing/email.
-
-# Generate new event ID
 EVENT_ID="$(date +%Y%m%d-%H%M%S)"
 echo "$EVENT_ID" > "$EVENT_ID_FILE"
-# Per-event WAV so unlink/rm of a stale path cannot steal the inode while arecord
-# still writes (global motion_audio.wav caused "recording started" but mux found no file).
 AUDIO_FILE="/dev/shm/motion_audio_${EVENT_ID}.wav"
 
-logger -t motion_event "New motion event started: $EVENT_ID"
+shm_usage() { df -P /dev/shm | awk 'NR==2 {print $5}'; }
+
+logger -t "$TAG" "EVENT_START event=$EVENT_ID shm_usage=$(shm_usage)"
 
 ############################################################
 # Audio + Fart Detection – start fart_detector.py
@@ -35,7 +30,7 @@ fi
 pkill -f "fart_detector.py" -u motion 2>/dev/null || true
 pkill -x -u motion arecord 2>/dev/null || true
 sleep 0.2
-rm -f "$AUDIO_FILE"
+rm -f /dev/shm/motion_audio_*.wav /dev/shm/motion_audio_*.wav.mux 2>/dev/null || true
 
 FART_DETECTOR="/usr/local/bin/fart_detector.py"
 

@@ -10,6 +10,10 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Real recipient lives in /etc/motion-alerts.env (untracked) so it stays out of
+# version control. See etc/motion-alerts.env.example for the template.
+if [ -r /etc/motion-alerts.env ]; then . /etc/motion-alerts.env; fi
+
 ENV_FILE="/etc/default/motion-bed-state"
 SERVICE_FILE="/etc/systemd/system/motion-bed-state.service"
 TIMER_FILE="/etc/systemd/system/motion-bed-state.timer"
@@ -38,7 +42,7 @@ MASK_POLYGON=0
 PAD=0
 CHECK_INTERVAL_MINUTES=5
 CHECK_TIMES=10:00,16:00
-TO_EMAIL=ben0r0blair@gmail.com
+TO_EMAIL=${TO_EMAIL:-alerts@example.com}
 EOF
 else
   echo "Keeping existing env file: $ENV_FILE"

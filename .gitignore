@@ -14,10 +14,10 @@ sample.jpg
 # Local symlink to live recordings (see pi-motion-vision.code-workspace)
 motion-videos
 
-# Secrets (copy from etc/fart-detector.env.example → /etc/fart-detector.env on the Pi)
+# Secrets (copy the matching *.example file and fill in real values on the Pi)
 etc/fart-detector.env
 etc/supabase.env
-etc/supabase.env.example
+etc/motion-alerts.env
 
 # Standalone school / demo repo (separate git root)
 school-supabase-upload/
@@ -26,3 +26,8 @@ school-supabase-upload/
 results/
 **/__pycache__/
 *.pyc
+
+# ffmpeg two-pass encoding artifacts
+ffmpeg2pass-*.log
+ffmpeg2pass-*.log.mbtree
+*.mbtree

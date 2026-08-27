@@ -13,11 +13,9 @@ exec 9>"$LOCKFILE"
 flock 9
 
 ############################################################
-# Audio – do NOT kill arecord here. on_movie_end owns the full
-# arecord lifecycle (stop → mux → restart). Killing here raced
-# with on_movie_end and caused the WAV file to be missing or
-# in a transient state when the mux ran. on_event_start handles
-# stale arecord cleanup for the next event.
+# Audio cleanup is deferred to the end of this script (after
+# snapshot selection, email, and housekeeping) so that
+# on_movie_end has time to finish muxing the final segment.
 ############################################################
 
 WORKDIR="$(mktemp -d -p /var/lib/motion eventproc.XXXXXX)"
@@ -153,5 +151,30 @@ fi
 
 # Clear snapshots for the finished event ONLY (anything not newer than cutoff)
 find "$SNAPDIR" -maxdepth 1 -type f -name "*.jpg" ! -newer "$CUTOFF_FILE" -delete || true
+
+############################################################
+# Audio – stop fart detector / arecord now that the event is
+# fully processed.  on_movie_end already muxed the final
+# segment's audio by this point (it runs before on_event_end
+# and completes well before we reach this line).
+############################################################
+PID_FILE="/dev/shm/motion_audio.pid"
+if [ -f "$PID_FILE" ]; then
+  audio_pid=$(cat "$PID_FILE" 2>/dev/null)
+  if [ -n "$audio_pid" ] && kill -0 "$audio_pid" 2>/dev/null; then
+    kill "$audio_pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$audio_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+  rm -f "$PID_FILE"
+fi
+pkill -f "fart_detector.py" -u motion 2>/dev/null || true
+pkill -x -u motion arecord 2>/dev/null || true
+rm -f /dev/shm/motion_audio_*.wav /dev/shm/motion_audio_*.wav.mux 2>/dev/null || true
+
+shm_pct() { df -P /dev/shm | awk 'NR==2 {print $5}'; }
+logger -t motion_event "EVENT_END event=$EVENT_ID shm_after=$(shm_pct)"
 
 exit 0

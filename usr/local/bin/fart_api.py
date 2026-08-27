@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Flask API server for the Fart Detection dashboard.
+Flask API server for fart detection data and settings.
 
 Serves fart events from SQLite, thumbnails, videos, and
 detection settings. Intended to run as a systemd service.
@@ -69,7 +69,7 @@ def close_db(exception):
         db.close()
 
 # ---------------------------------------------------------------------------
-# CORS (allow React dev server on different port)
+# CORS (browser or cross-origin JSON clients)
 # ---------------------------------------------------------------------------
 
 @app.after_request

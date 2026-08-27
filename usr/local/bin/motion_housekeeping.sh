@@ -108,6 +108,25 @@ if [ -d "$BEST_DIR" ]; then
   fi
 fi
 
+# Clean up stale score-cache SQLite DBs (one per event, can accumulate).
+if [ -d "$MOTION_DIR" ]; then
+  find "$MOTION_DIR" -maxdepth 1 -name "score_cache_*.sqlite3" -mtime +2 -delete 2>/dev/null || true
+fi
+
+# Clean up orphan audio WAVs in /dev/shm (safety net for crashes).
+for f in /dev/shm/motion_audio_*.wav /dev/shm/motion_audio_*.wav.mux; do
+  [ -f "$f" ] || continue
+  if ! fuser "$f" >/dev/null 2>&1; then
+    rm -f "$f" 2>/dev/null || true
+    log "Removed orphan shm file: $f"
+  fi
+done
+
+# Clean up stale /dev/shm debug scoring dirs older than 1 day.
+if [ -d /dev/shm/motion_debug_scoring ]; then
+  find /dev/shm/motion_debug_scoring -mindepth 1 -maxdepth 1 -type d -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+fi
+
 # Prune empty directories left after cleanup.
 if [ -d "$MOTION_DIR" ]; then
   find "$MOTION_DIR" -type d -empty -delete 2>/dev/null || true

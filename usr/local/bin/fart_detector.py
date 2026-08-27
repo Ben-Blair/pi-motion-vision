@@ -59,6 +59,11 @@ COOLDOWN_SECONDS = 3
 CLASSIFY_WINDOW_SEC = 1.0
 CLASSIFY_HOP_SEC = 0.5
 THRESHOLD_REFRESH_SEC = 5.0
+# Safety cap: stop writing PCM to the WAV once it reaches this size.
+# ~200 MB ≈ 38 min at 44100 Hz 16-bit mono.  Classification keeps running
+# in memory; only disk I/O stops.  Normal movie segments (movie_max_time=600s)
+# produce ~53 MB, so this cap should never be hit under normal operation.
+MAX_WAV_BYTES = 200 * 1024 * 1024
 WEATHER_ENV_FILE = Path("/etc/fart-detector.env")
 WEATHER_CACHE_TTL = 600  # 10 minutes
 
@@ -70,7 +75,6 @@ _weather_cache: dict = {"temp_f": None, "fetched_at": 0.0}
 
 
 def _load_weather_env() -> dict[str, str]:
-    """Read key=value pairs from /etc/fart-detector.env (template: etc/fart-detector.env.example)."""
     env: dict[str, str] = {}
     if not WEATHER_ENV_FILE.exists():
         return env
@@ -118,38 +122,29 @@ def _fetch_weather() -> float | None:
         return temp_f
     except Exception as e:
         log.warning("Weather fetch failed: %s", e)
-        return _weather_cache["temp_f"]  # stale cache is better than nothing
+        return _weather_cache["temp_f"]
 
 
 def _temp_to_descriptor(temp_f: float) -> str:
-    if temp_f < 20:
-        return "Frozen"
-    if temp_f < 32:
-        return "Frigid"
-    if temp_f < 45:
-        return "Brisk"
-    if temp_f < 60:
-        return "Crisp"
-    if temp_f < 75:
-        return "Mild"
+    if temp_f < 50:
+        return "cold"
+    if temp_f < 65:
+        return "brisk"
     if temp_f < 85:
-        return "Warm"
-    if temp_f < 95:
-        return "Toasty"
-    return "Scorching"
+        return "warm"
+    return "hot"
 
 
-def build_tts_message() -> str:
-    """Return a weather-qualified announcement, or a plain fallback."""
+def get_weather_descriptor() -> str:
+    """Return a lowercase weather descriptor for recording selection, or empty string."""
     try:
         temp_f = _fetch_weather()
         if temp_f is None:
-            return "Fart detected"
-        desc = _temp_to_descriptor(temp_f)
-        return f"{desc} fart detected"
+            return ""
+        return _temp_to_descriptor(temp_f).lower()
     except Exception as e:
-        log.warning("Failed to build weather TTS message: %s", e)
-        return "Fart detected"
+        log.warning("Failed to get weather descriptor: %s", e)
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -289,13 +284,21 @@ def resample_to_yamnet(audio_f32: np.ndarray, src_sr: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 class WavWriter:
-    """Incrementally writes a WAV file, finalizing the RIFF header on close."""
+    """Incrementally writes a WAV file, finalizing the RIFF header on close.
 
-    def __init__(self, path: str, rate: int = RECORD_SAMPLE_RATE, channels: int = 1):
+    Once *max_bytes* of PCM data have been written the writer silently drops
+    further samples so /dev/shm can never be exhausted.  The WAV header is
+    still finalized correctly on close for whatever was written.
+    """
+
+    def __init__(self, path: str, rate: int = RECORD_SAMPLE_RATE, channels: int = 1,
+                 max_bytes: int = MAX_WAV_BYTES):
         self.path = path
         self.rate = rate
         self.channels = channels
         self.sample_width = 2  # 16-bit
+        self._max_bytes = max_bytes
+        self._capped = False
         self._f = open(path, "wb")
         self._data_bytes = 0
         self._write_header()
@@ -314,18 +317,28 @@ class WavWriter:
         self._f.write(struct.pack("<I", 0))  # placeholder
 
     def write(self, pcm_int16: np.ndarray):
+        if self._capped:
+            return
         raw = pcm_int16.astype(np.int16).tobytes()
+        if self._data_bytes + len(raw) > self._max_bytes:
+            log.warning("WAV size cap reached (%d bytes); disk writes stopped, "
+                        "classification continues in memory", self._max_bytes)
+            self._capped = True
+            return
         self._f.write(raw)
         self._data_bytes += len(raw)
 
     def close(self):
         if self._f.closed:
             return
-        self._f.seek(4)
-        self._f.write(struct.pack("<I", 36 + self._data_bytes))
-        self._f.seek(40)
-        self._f.write(struct.pack("<I", self._data_bytes))
-        self._f.flush()
+        try:
+            self._f.seek(4)
+            self._f.write(struct.pack("<I", 36 + self._data_bytes))
+            self._f.seek(40)
+            self._f.write(struct.pack("<I", self._data_bytes))
+            self._f.flush()
+        except OSError as exc:
+            log.warning("Failed to finalize WAV header: %s", exc)
         self._f.close()
 
 # ---------------------------------------------------------------------------
@@ -396,11 +409,14 @@ class FartDetector:
         if not BT_SCRIPT.exists():
             log.warning("BT script not found at %s", BT_SCRIPT)
             return
-        message = build_tts_message()
-        log.info("BT announcement: %s", message)
+        descriptor = get_weather_descriptor()
+        log.info("BT announcement: weather descriptor=%r", descriptor or "(none)")
         try:
+            cmd = [str(BT_SCRIPT)]
+            if descriptor:
+                cmd.append(descriptor)
             subprocess.Popen(
-                [str(BT_SCRIPT), message],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )

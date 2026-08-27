@@ -8,7 +8,10 @@ IMAGE_PATH="${4:-}"
 T_LOW="${5:-na}"
 T_HIGH="${6:-na}"
 
-TO_EMAIL="${TO_EMAIL:-ben0r0blair@gmail.com}"
+# Recipient lives in /etc/motion-alerts.env so it stays out of version control.
+# See etc/motion-alerts.env.example for the template.
+if [ -r /etc/motion-alerts.env ]; then . /etc/motion-alerts.env; fi
+TO_EMAIL="${TO_EMAIL:-alerts@example.com}"
 LOG_TAG="motion_bed_state_email"
 NOW="$(date '+%A, %b %-d at %-I:%M %p')"
 
