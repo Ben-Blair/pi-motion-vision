@@ -1,0 +1,16 @@
+[Unit]
+Description=Motion debug scoring gallery (LAN)
+After=network.target motion.service
+Wants=motion.service
+
+[Service]
+Type=simple
+User=motion
+Environment=MOTION_DEBUG_ROOT=/dev/shm/motion_debug_scoring
+ExecStartPre=/usr/bin/mkdir -p /dev/shm/motion_debug_scoring
+ExecStart=/usr/bin/python3 /usr/local/bin/motion_debug_viewer.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

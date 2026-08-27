@@ -1,0 +1,23 @@
+[Unit]
+Description=Motion snapshot scoring worker (queue-based)
+After=network.target motion.service
+Wants=motion.service
+
+[Service]
+Type=simple
+User=motion
+WorkingDirectory=/var/lib/motion
+Environment=MOTION_SNAPSHOT_KEEP_N=500
+Environment=MOTION_BEST_CHECKPOINT_SECS=60
+Environment=MOTION_BEST_CHECKPOINT_DELTA=500
+Environment=MOTION_T2_STABILITY_WINDOW_SECS=3
+Environment=MOTION_T2_STABILITY_IOU=0.30
+Environment=MOTION_T2_STABILITY_MIN_MATCHES=2
+Environment=MOTION_DEBUG_LIVE=0
+ExecStartPre=/bin/mkdir -p /var/lib/motion/score_queue /var/lib/motion/best_snapshots
+ExecStart=/usr/bin/python3 /usr/local/bin/motion_score_worker.py
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

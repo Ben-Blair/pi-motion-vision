@@ -1,0 +1,10 @@
+[Unit]
+Description=Motion Self Test
+After=motion.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/motion_self_test.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,28 @@
+# Outgoing mail configuration for alert emails.
+#
+# Install for the user that sends mail, and for the "motion" service user:
+#   cp etc/msmtprc.example ~/.msmtprc && chmod 600 ~/.msmtprc
+#
+# A system-wide copy at /etc/msmtprc is used when a service account has no
+# ~/.msmtprc of its own:
+#   sudo cp etc/msmtprc.example /etc/msmtprc && sudo chmod 600 /etc/msmtprc
+#
+# Gmail requires an App Password (with 2FA enabled), not your account
+# password: https://myaccount.google.com/apppasswords
+#
+# Never commit the filled-in version; it holds a live credential.
+
+defaults
+auth           on
+tls            on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
+logfile        /tmp/msmtp.log
+
+account gmail
+host smtp.gmail.com
+port 587
+from YOUR_ADDRESS@gmail.com
+user YOUR_ADDRESS@gmail.com
+password YOUR_APP_PASSWORD
+
+account default : gmail

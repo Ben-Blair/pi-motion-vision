@@ -43,21 +43,27 @@ deleted per-event once the best frame has been chosen.
 
 ### systemd units
 
-| Unit | Role |
-| --- | --- |
-| `motion.service` | The Motion daemon (with a drop-in override for config path and env) |
-| `motion-score-worker.service` | Queue-based snapshot scoring worker |
-| `motion-bed-state.timer` | Periodic bed-state check |
-| `motion-housekeeping.timer` | Nightly pruning of clips and artifacts |
-| `motion-disk-guard.timer` | Emergency cleanup when disk runs low |
-| `motion-selftest.service` | Verifies services, writable paths, and the email path |
-| `fart-api.service` | JSON API backing the dashboard |
+| Unit | Role | Installed by |
+| --- | --- | --- |
+| `motion.service` + drop-in | Motion daemon; the drop-in sets the config path and pipeline env vars | `install_systemd_units.sh` |
+| `motion-score-worker.service` | Queue-based snapshot scoring worker | `install_systemd_units.sh` |
+| `motion-selftest.service` | Verifies services, writable paths, and the email path | `install_systemd_units.sh` |
+| `pipewire-motion-acl.service` | Grants the `motion` user access to PipeWire audio | `install_systemd_units.sh` |
+| `motion-debug-viewer.service` | Optional LAN gallery of scored frames (off by default) | `install_systemd_units.sh` |
+| `fart-api.service` | Optional JSON API backing the dashboard (off by default) | `install_systemd_units.sh` |
+| `motion-housekeeping.timer` | Nightly pruning of clips and artifacts | `install_motion_housekeeping_timer.sh` |
+| `motion-disk-guard.timer` | Hourly check, emergency cleanup when disk runs low | `install_motion_housekeeping_timer.sh` |
+| `motion-bed-state.timer` | Scheduled bed-state check | `install_bed_state_timer.sh` |
+
+`motion-debug-viewer.service` and `fart-api.service` are deliberately left disabled. The viewer
+serves scored frames over the LAN with no authentication and the API binds `0.0.0.0`, so only
+enable them on a network you trust.
 
 ## Repository layout
 
 ```
 etc/motion/          Motion daemon and per-camera configs
-etc/systemd/         Unit files for the API and audio ACL helper
+etc/systemd/         Unit files plus the motion.service drop-in override
 scripts/             Motion hook scripts and installers
 usr/local/bin/       Long-running scripts installed onto PATH
 staging/             Worker/scoring scripts staged before promotion
@@ -82,11 +88,19 @@ this project is set up. `deploy_to_live.sh` does the opposite, replacing symlink
 
 ### 1. Configure outbound email
 
-Alert mail is sent with `msmtp`. Create `~/.msmtprc` with your SMTP provider's details and lock it
-down; for Gmail this means an app password, not your account password:
+Alert mail is sent with `msmtp`. For Gmail this needs an app password, not your account password:
 
 ```bash
+cp etc/msmtprc.example ~/.msmtprc
+nano ~/.msmtprc
 chmod 600 ~/.msmtprc
+```
+
+Hooks run as the unprivileged `motion` user, which has no home of its own, so also install a
+system-wide copy that it can fall back to:
+
+```bash
+sudo cp ~/.msmtprc /etc/msmtprc && sudo chmod 600 /etc/msmtprc
 ```
 
 ### 2. Set the recipient address
@@ -103,11 +117,21 @@ sudo chmod 644 /etc/motion-alerts.env
 It must stay world-readable, because the alert scripts run as the unprivileged `motion` user.
 Any script also honours a `TO_EMAIL` environment variable, which takes precedence.
 
-### 3. Install the scripts and configs
+### 3. Install the scripts, configs, and services
+
+`link_repo_to_live.sh` symlinks `/etc/motion` and `/usr/local/bin` at this checkout;
+`install_systemd_units.sh` then installs the units and starts the daemon and scoring worker.
 
 ```bash
 ./scripts/link_repo_to_live.sh
-sudo systemctl restart motion
+./scripts/install_systemd_units.sh
+./scripts/install_motion_housekeeping_timer.sh
+```
+
+Confirm the pipeline end to end:
+
+```bash
+sudo /usr/local/bin/motion_self_test.sh
 ```
 
 ### 4. Optional: Supabase clip upload
@@ -215,7 +239,16 @@ journalctl -t motion_event -t motion_email -t motion_bed_state_email -f
 ```
 
 Set `MOTION_DEBUG_SCORING=1` in the `motion.service` drop-in to have the event-end pass write
-annotated scoring frames to `/var/lib/motion/debug_scoring/latest`.
+annotated scoring frames to `/var/lib/motion/debug_scoring/latest`. To browse those frames, start
+the viewer and open `http://<pi-address>:8765`:
+
+```bash
+sudo systemctl start motion-debug-viewer.service
+```
+
+The unit points `MOTION_DEBUG_ROOT` at `/dev/shm/motion_debug_scoring`, so override it to match
+wherever the pipeline is writing. Leave the viewer stopped when you are done; it has no
+authentication.
 
 ## Secrets
 
@@ -227,4 +260,7 @@ locally from their `.example` counterparts:
 | `/etc/motion-alerts.env` | Alert recipient address |
 | `etc/supabase.env` | Supabase project URL and service role key |
 | `/etc/fart-detector.env` | OpenWeatherMap API key and coordinates |
-| `~/.msmtprc` | SMTP credentials |
+| `~/.msmtprc`, `/etc/msmtprc` | SMTP credentials |
+
+Training images for the bed-state model are also kept out of the repo, since they are photographs
+of a private room. `scripts/bed_capture_frames.sh` captures your own set.
